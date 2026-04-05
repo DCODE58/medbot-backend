@@ -2,10 +2,9 @@
 """
 Medical NLP Processor — NLTK only, no spaCy.
 
-spaCy (and its compiled C dependencies blis/thinc) have been removed because:
-  1. self.nlp was loaded but never called in any method — zero functionality lost.
-  2. blis requires compiling thousands of lines of C on Render, causing 8-minute
-     builds and hundreds of [-Wunused-function] compiler warnings.
+spaCy removed because:
+  1. self.nlp was never called in any method — zero functionality lost.
+  2. blis/thinc require compiling C on Render, causing build failures.
   3. NLTK is pure Python — installs in seconds, no compilation required.
 
 Two-pass symptom extraction:
@@ -20,7 +19,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import List
+from typing import Dict, List
 
 import nltk
 from django.core.cache import cache
@@ -29,7 +28,7 @@ from nltk.tokenize import word_tokenize
 
 logger = logging.getLogger(__name__)
 
-# Download NLTK data to /tmp so it works on Render's read-only home directory.
+# Download NLTK data to /tmp so it works on Render's read-only home directory
 _nltk_data_dir = os.getenv("NLTK_DATA", "/tmp/nltk_data")
 os.makedirs(_nltk_data_dir, exist_ok=True)
 
@@ -42,14 +41,14 @@ for _pkg in ("punkt", "punkt_tab", "stopwords", "wordnet"):
 if _nltk_data_dir not in nltk.data.path:
     nltk.data.path.insert(0, _nltk_data_dir)
 
-SYMPTOMS_CACHE_TIMEOUT  = 3600  # 1 hour
-EMERGENCY_CACHE_TIMEOUT = 3600  # 1 hour
+SYMPTOMS_CACHE_TIMEOUT  = 3600
+EMERGENCY_CACHE_TIMEOUT = 3600
 
 
 class MedicalNLPProcessor:
     """
     Extracts medical symptoms and emergency keywords from free-text input.
-    Designed for Kenyan patients: includes Swahili and colloquial Kenyan terms.
+    Includes Swahili and colloquial Kenyan terms.
     """
 
     def __init__(self) -> None:
@@ -59,8 +58,7 @@ class MedicalNLPProcessor:
             logger.warning("NLTK stopwords not available — using empty set")
             self.stop_words = set()
 
-        # Kenyan / Swahili symptom variation dictionary
-        self.symptom_variations: dict[str, List[str]] = {
+        self.symptom_variations: Dict[str, List[str]] = {
             "fever": [
                 "fever", "hot body", "high temperature", "sweating", "chills",
                 "feverish", "joto", "feeling hot", "night sweats", "homa",
@@ -198,7 +196,7 @@ class MedicalNLPProcessor:
         key = "nlp_symptoms_v2"
         result = cache.get(key)
         if result is None:
-            from .models import Symptom  # local import avoids circular import
+            from .models import Symptom
             result = list(Symptom.objects.only("id", "name", "alternative_names"))
             cache.set(key, result, SYMPTOMS_CACHE_TIMEOUT)
         return result
@@ -264,24 +262,21 @@ class MedicalNLPProcessor:
                 unique.append(s)
         return unique
 
-    def detect_emergency(self, text: str) -> List[dict]:
+    def detect_emergency(self, text: str) -> List[Dict]:
         """
         Check text for emergency keywords.
         Returns [{ 'keyword': str, 'severity': str, 'message': str }, ...]
         """
         text_lower = text.lower()
-        emergencies: List[dict] = []
+        emergencies: List[Dict] = []
         try:
             for kw in self._get_emergency_keywords():
                 if kw.keyword.lower() in text_lower:
-                    emergencies.append(
-                        {
-                            "keyword":  kw.keyword,
-                            "severity": kw.severity,
-                            "message":  kw.response_message,
-                        }
-                    )
+                    emergencies.append({
+                        "keyword":  kw.keyword,
+                        "severity": kw.severity,
+                        "message":  kw.response_message,
+                    })
         except Exception as exc:
             logger.error("Emergency detection error: %s", exc)
         return emergencies
-        
