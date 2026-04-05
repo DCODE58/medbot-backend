@@ -43,7 +43,7 @@ services:
       # Comma-separated — no spaces.  Add Vercel URL after first deploy.
       # Example: https://medbot.vercel.app,https://medbot-git-main-user.vercel.app
       - key: ALLOWED_HOSTS
-        value: "*"
+        value: "medbot-backend-vpf5.onrender.com"
 
       - key: CORS_ALLOWED_ORIGINS
         value: "https://medbot-frontend-iota.vercel.app/"
