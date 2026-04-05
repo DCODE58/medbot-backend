@@ -1,280 +1,287 @@
 # chatbot/nlp_processor.py
 """
-Medical NLP Processor.
+Medical NLP Processor — NLTK only, no spaCy.
 
-Fix 7: NLTK writes data to ~/nltk_data by default.  On Render free tier the
-home directory is read-only after the build phase, so runtime downloads fail.
-We read NLTK_DATA from the environment (set to /tmp/nltk_data in render.yaml)
-and pass it explicitly to every nltk.download() call.
+spaCy (and its compiled C dependencies blis/thinc) have been removed because:
+  1. self.nlp was loaded but never called in any method — zero functionality lost.
+  2. blis requires compiling thousands of lines of C on Render, causing 8-minute
+     builds and hundreds of [-Wunused-function] compiler warnings.
+  3. NLTK is pure Python — installs in seconds, no compilation required.
+
+Two-pass symptom extraction:
+  Pass 1 — DB Symptom records (name + alternative_names), cached.
+  Pass 2 — Hardcoded Kenyan/Swahili variation dictionary.
+
+Emergency detection queries the EmergencyKeyword table, cached.
 """
 
+from __future__ import annotations
+
+import logging
 import os
 import re
-import logging
-from typing import List, Dict
+from typing import List
 
+import nltk
 from django.core.cache import cache
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
 
 logger = logging.getLogger(__name__)
 
-SYMPTOMS_CACHE_KEY      = "nlp:symptoms:v3"
-EMERGENCY_CACHE_KEY     = "nlp:emergency:v3"
-SYMPTOMS_CACHE_TIMEOUT  = 3600
-EMERGENCY_CACHE_TIMEOUT = 3600
+# Download NLTK data to /tmp so it works on Render's read-only home directory.
+_nltk_data_dir = os.getenv("NLTK_DATA", "/tmp/nltk_data")
+os.makedirs(_nltk_data_dir, exist_ok=True)
 
-# Fix 7: read the writable NLTK data dir from the environment
-_NLTK_DATA_DIR: str = os.getenv("NLTK_DATA", "/tmp/nltk_data")
+for _pkg in ("punkt", "punkt_tab", "stopwords", "wordnet"):
+    try:
+        nltk.download(_pkg, download_dir=_nltk_data_dir, quiet=True)
+    except Exception as _e:
+        logger.warning("NLTK download skipped for %s: %s", _pkg, _e)
 
+if _nltk_data_dir not in nltk.data.path:
+    nltk.data.path.insert(0, _nltk_data_dir)
 
-def _ensure_nltk() -> None:
-    """Download required NLTK corpora into the writable data directory."""
-    import nltk
-
-    # Add our directory to NLTK's search path if it isn't there already
-    if _NLTK_DATA_DIR not in nltk.data.path:
-        nltk.data.path.insert(0, _NLTK_DATA_DIR)
-
-    for corpus in ("punkt", "punkt_tab", "stopwords", "wordnet"):
-        try:
-            nltk.download(corpus, download_dir=_NLTK_DATA_DIR, quiet=True)
-        except Exception as exc:  # network unavailable etc.
-            logger.warning("NLTK download '%s' skipped: %s", corpus, exc)
+SYMPTOMS_CACHE_TIMEOUT  = 3600  # 1 hour
+EMERGENCY_CACHE_TIMEOUT = 3600  # 1 hour
 
 
 class MedicalNLPProcessor:
     """
-    Two-pass symptom extraction:
-      Pass 1 — Symptom records from the database (name + alternative_names).
-      Pass 2 — Hardcoded Kenyan / Swahili variation dictionary.
-
-    Emergency detection uses the EmergencyKeyword table.
-    Heavy DB results are cached in DatabaseCache for 1 hour.
+    Extracts medical symptoms and emergency keywords from free-text input.
+    Designed for Kenyan patients: includes Swahili and colloquial Kenyan terms.
     """
 
     def __init__(self) -> None:
-        _ensure_nltk()
-        self._nlp = None  # spaCy model — lazy-loaded on first use
+        try:
+            self.stop_words = set(stopwords.words("english"))
+        except LookupError:
+            logger.warning("NLTK stopwords not available — using empty set")
+            self.stop_words = set()
 
-        self.symptom_variations: Dict[str, List[str]] = {
+        # Kenyan / Swahili symptom variation dictionary
+        self.symptom_variations: dict[str, List[str]] = {
             "fever": [
                 "fever", "hot body", "high temperature", "sweating", "chills",
                 "feverish", "joto", "feeling hot", "night sweats", "homa",
-                "body is hot", "ninauma joto", "high fever",
+                "body is hot", "ninauma joto",
             ],
             "headache": [
                 "headache", "head pain", "head hurting", "migraine",
                 "kichwa kuuma", "throbbing head", "pressure in head",
-                "maumivu ya kichwa", "head ache",
+                "maumivu ya kichwa",
             ],
             "cough": [
                 "cough", "coughing", "dry cough", "wet cough", "kikohozi",
                 "chest cough", "barking cough", "cannot stop coughing",
-                "coughing blood", "pink sputum", "productive cough",
+                "coughing blood", "pink sputum",
             ],
             "fatigue": [
                 "fatigue", "tired", "weakness", "exhausted", "lethargy",
                 "no energy", "body weak", "uchovu", "udhaifu", "mwili dhaifu",
-                "feeling weak", "always tired",
             ],
             "vomiting": [
                 "vomit", "vomiting", "throwing up", "nausea", "sick stomach",
-                "kutapika", "feel like vomiting", "nauseated",
+                "kutapika", "feel like vomiting",
             ],
             "diarrhea": [
                 "diarrhea", "diarrhoea", "loose stools", "running stomach",
                 "watery stool", "kuhara", "kutharau", "stomach running",
-                "frequent stool", "watery poop", "loose motion",
+                "frequent stool", "watery poop",
             ],
             "chest_pain": [
                 "chest pain", "chest discomfort", "heart pain", "tight chest",
-                "maumivu kifua", "squeezing chest", "chest tightness",
+                "maumivu kifua", "squeezing chest",
             ],
             "difficulty_breathing": [
                 "difficulty breathing", "shortness of breath", "can't breathe",
                 "breathing fast", "wheezing", "kupumua shida", "breathless",
-                "laboured breathing", "unable to breathe", "hard to breathe",
+                "laboured breathing", "unable to breathe",
             ],
             "joint_pain": [
                 "joint pain", "joint ache", "arthritis", "pain in joints",
-                "knees hurt", "maumivu viungo", "painful joints", "aching joints",
+                "knees hurt", "maumivu viungo", "painful joints",
             ],
             "muscle_pain": [
                 "muscle pain", "myalgia", "body aches", "sore muscles",
                 "whole body pain", "mwili kuuma", "maumivu mwilini",
-                "body is aching",
             ],
             "stomach_ache": [
                 "stomach ache", "stomach pain", "abdominal pain", "belly pain",
                 "tumbo kuuma", "cramping", "tummy hurts", "stomach cramps",
-                "lower abdominal pain",
             ],
             "rash": [
                 "rash", "skin rash", "red spots", "itching", "hives",
-                "skin bumps", "upele", "kuwasha ngozi", "skin itching",
+                "skin bumps", "upele", "kuwasha ngozi",
             ],
             "dehydration": [
                 "dehydrated", "dry mouth", "sunken eyes", "thirsty", "dark urine",
-                "no tears", "very thirsty", "mouth dry", "not urinating",
+                "no tears", "very thirsty", "mouth dry",
             ],
             "confusion": [
                 "confused", "disoriented", "delirium", "not acting normal",
                 "altered mental", "not responding", "behaving strangely",
-                "not making sense",
             ],
             "sore_throat": [
                 "sore throat", "throat pain", "swallowing difficulty",
                 "throat swollen", "koo kuuma", "painful swallow",
-                "difficulty swallowing",
             ],
             "dizziness": [
                 "dizzy", "dizziness", "lightheaded", "spinning", "vertigo",
-                "off balance", "kizunguzungu", "feeling faint",
+                "off balance", "kizunguzungu",
             ],
             "numbness": [
                 "numb", "numbness", "tingling", "pins and needles",
-                "loss of feeling", "feet tingling", "hands tingling",
+                "loss of feeling", "feet tingling",
             ],
             "swelling": [
                 "swelling", "swollen", "edema", "puffy", "inflamed",
-                "kuvimba", "swollen feet", "swollen face", "swollen ankles",
+                "kuvimba", "swollen feet", "swollen face",
             ],
             "weight_loss": [
                 "weight loss", "losing weight", "getting thin",
-                "kupoteza uzito", "wasting", "very thin", "dramatic weight loss",
+                "kupoteza uzito", "wasting", "very thin",
             ],
             "night_sweats": [
                 "night sweats", "sweating at night", "waking up sweaty",
-                "bedsheets wet from sweat", "drenched in sweat at night",
+                "bedsheets wet from sweat",
             ],
             "jaundice": [
                 "yellow eyes", "yellow skin", "jaundice", "macho ya njano",
-                "yellowing", "eyes are yellow", "skin turning yellow",
+                "yellowing", "eyes are yellow",
             ],
             "blood_cough": [
                 "coughing blood", "blood in sputum", "bloody cough",
-                "pink sputum", "blood when coughing", "haemoptysis",
+                "pink sputum", "blood when coughing",
             ],
             "frequent_urination": [
                 "frequent urination", "urinating often", "passing urine many times",
-                "wake up to pee", "mkojo mara nyingi", "always urinating",
+                "wake up to pee", "mkojo mara nyingi",
             ],
             "burning_urination": [
                 "burning urination", "painful urination", "urine burns",
-                "pain when urinating", "mkojo kuuma", "burning when peeing",
+                "pain when urinating", "mkojo kuuma",
             ],
             "stiff_neck": [
                 "stiff neck", "neck stiffness", "cannot bend neck",
-                "shingo ngumu", "neck pain", "rigid neck",
+                "shingo ngumu", "neck pain",
             ],
             "convulsions": [
                 "convulsions", "seizure", "fits", "shaking uncontrollably",
-                "degedege", "epileptic attack", "jerking", "fitting",
+                "degedege", "epileptic attack", "jerking",
             ],
             "pale_skin": [
                 "pale skin", "pallor", "pale gums", "white gums",
-                "pale conjunctiva", "inner eyelids pale", "pale face",
+                "pale conjunctiva", "inner eyelids pale",
             ],
             "itching": [
                 "itching", "intense itch", "skin itching", "genital itching",
-                "kuwasha", "mwili kuwasha", "scratching all over", "itchy",
+                "kuwasha", "mwili kuwasha", "scratching all over",
             ],
             "discharge": [
                 "discharge", "genital discharge", "pus", "yellow discharge",
-                "green discharge", "smelly discharge", "vaginal discharge",
+                "green discharge", "smelly discharge",
             ],
             "eye_pain": [
                 "eye pain", "red eyes", "eye discharge", "eye swelling",
-                "macho kuuma", "eyes red", "sticky eyes", "pink eye",
+                "macho kuuma", "eyes red", "sticky eyes",
             ],
             "ear_pain": [
-                "ear pain", "ear discharge", "hearing loss", "masikio kuuma",
-                "ears ringing", "ear ache", "pain in ear",
+                "ear pain", "ear discharge", "hearing loss",
+                "masikio kuuma", "ears ringing", "ear ache",
             ],
         }
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
-    @property
-    def nlp(self):
-        """Lazy-load spaCy model on first access."""
-        if self._nlp is None:
-            import spacy
-            try:
-                self._nlp = spacy.load("en_core_web_sm")
-            except OSError:
-                logger.warning("en_core_web_sm not found — downloading …")
-                spacy.cli.download("en_core_web_sm")
-                self._nlp = spacy.load("en_core_web_sm")
-        return self._nlp
-
-    def _db_symptoms(self):
-        result = cache.get(SYMPTOMS_CACHE_KEY)
+    def _get_all_symptoms(self) -> list:
+        key = "nlp_symptoms_v2"
+        result = cache.get(key)
         if result is None:
-            from .models import Symptom
+            from .models import Symptom  # local import avoids circular import
             result = list(Symptom.objects.only("id", "name", "alternative_names"))
-            cache.set(SYMPTOMS_CACHE_KEY, result, SYMPTOMS_CACHE_TIMEOUT)
+            cache.set(key, result, SYMPTOMS_CACHE_TIMEOUT)
         return result
 
-    def _db_emergency_keywords(self):
-        result = cache.get(EMERGENCY_CACHE_KEY)
+    def _get_emergency_keywords(self) -> list:
+        key = "nlp_emergency_v2"
+        result = cache.get(key)
         if result is None:
             from .models import EmergencyKeyword
-            result = list(EmergencyKeyword.objects.only("keyword", "severity", "response_message"))
-            cache.set(EMERGENCY_CACHE_KEY, result, EMERGENCY_CACHE_TIMEOUT)
+            result = list(
+                EmergencyKeyword.objects.only("keyword", "severity", "response_message")
+            )
+            cache.set(key, result, EMERGENCY_CACHE_TIMEOUT)
         return result
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+    def preprocess(self, text: str) -> List[str]:
+        """Lowercase → strip punctuation → tokenise → remove stopwords."""
+        text = text.lower()
+        text = re.sub(r"[^\w\s]", " ", text)
+        try:
+            tokens = word_tokenize(text)
+        except Exception:
+            tokens = text.split()
+        return [t for t in tokens if t not in self.stop_words]
+
     def extract_symptoms(self, text: str) -> List[str]:
-        """Return deduplicated symptom names extracted from free-form text."""
+        """
+        Extract symptom names from user input.
+        Returns a deduplicated list ordered by first match.
+        """
         text_lower = text.lower()
-        text_clean = re.sub(r"[^\w\s]", " ", text_lower)
         extracted: List[str] = []
 
-        # Pass 1 — database symptom records
+        # Pass 1 — DB symptom records (name + alternative_names)
         try:
-            for symptom in self._db_symptoms():
-                if symptom.name.lower() in text_clean:
+            for symptom in self._get_all_symptoms():
+                if symptom.name.lower() in text_lower:
                     extracted.append(symptom.name)
                     continue
                 if symptom.alternative_names:
                     for alt in symptom.alternative_names.split(","):
-                        alt = alt.strip().lower()
-                        if alt and alt in text_clean:
+                        if alt.strip().lower() in text_lower:
                             extracted.append(symptom.name)
                             break
         except Exception as exc:
-            logger.error("DB symptom extraction: %s", exc)
+            logger.error("DB symptom extraction error: %s", exc)
 
-        # Pass 2 — hardcoded Kenyan/Swahili variation dictionary
+        # Pass 2 — hardcoded Kenyan/Swahili variations
         for sym_key, variations in self.symptom_variations.items():
             for var in variations:
                 if var in text_lower:
                     extracted.append(sym_key)
                     break
 
-        # Deduplicate preserving order
+        # Deduplicate preserving insertion order
         seen: set = set()
         unique: List[str] = []
         for s in extracted:
-            s_norm = s.lower()
-            if s_norm not in seen:
-                seen.add(s_norm)
+            if s not in seen:
+                seen.add(s)
                 unique.append(s)
         return unique
 
-    def detect_emergency(self, text: str) -> List[Dict]:
-        """Return list of { keyword, severity, message } for any emergency triggers found."""
+    def detect_emergency(self, text: str) -> List[dict]:
+        """
+        Check text for emergency keywords.
+        Returns [{ 'keyword': str, 'severity': str, 'message': str }, ...]
+        """
         text_lower = text.lower()
-        emergencies: List[Dict] = []
+        emergencies: List[dict] = []
         try:
-            for kw in self._db_emergency_keywords():
+            for kw in self._get_emergency_keywords():
                 if kw.keyword.lower() in text_lower:
-                    emergencies.append({
-                        "keyword":  kw.keyword,
-                        "severity": kw.severity,
-                        "message":  kw.response_message,
-                    })
+                    emergencies.append(
+                        {
+                            "keyword":  kw.keyword,
+                            "severity": kw.severity,
+                            "message":  kw.response_message,
+                        }
+                    )
         except Exception as exc:
-            logger.error("detect_emergency: %s", exc)
+            logger.error("Emergency detection error: %s", exc)
         return emergencies
+        
