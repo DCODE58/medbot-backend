@@ -46,7 +46,7 @@ services:
         value: "medbot-api.onrender.com"
 
       - key: CORS_ALLOWED_ORIGINS
-        value: "https://medbot.vercel.app"
+        value: "https://medbot-frontend-iota.vercel.app/"
 
       # NLTK data directory — writable on Render free tier
       - key: NLTK_DATA
