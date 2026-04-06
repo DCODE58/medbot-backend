@@ -5,18 +5,25 @@ services:
     region: oregon
     plan: free
 
+    # Use sh -c so every command's stdout/stderr goes to the build log
+    # and $PORT is shell-expanded at runtime.
     buildCommand: |
+      set -e
+      echo "==> pip install"
       pip install --upgrade pip setuptools wheel
       pip install --prefer-binary -r requirements.txt
-      python -m nltk.downloader -q -d /opt/render/nltk_data punkt punkt_tab stopwords wordnet
+      echo "==> NLTK data"
+      python -m nltk.downloader -q -d /tmp/nltk_data punkt punkt_tab stopwords wordnet
+      echo "==> collectstatic"
       mkdir -p staticfiles
       python manage.py collectstatic --noinput
+      echo "==> migrate"
       python manage.py migrate --noinput
+      echo "==> populate_kenya_data"
+      python manage.py populate_kenya_data --force
+      echo "==> build done"
 
-    startCommand: |
-      python manage.py createcachetable || true
-      python manage.py populate_kenya_data --force || true
-      gunicorn medical_chatbot.wsgi:application --worker-class gthread --workers 2 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT --log-level info
+    startCommand: sh -c 'gunicorn medical_chatbot.wsgi:application --worker-class gthread --workers 2 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT --log-level info'
 
     healthCheckPath: /api/health/
 
@@ -33,16 +40,16 @@ services:
         value: "False"
 
       - key: ALLOWED_HOSTS
-        value: "medbot-backend-vpf5.onrender.com,localhost,127.0.0.1"
+        value: "medbot-backend-vpf5.onrender.com"
 
       - key: CORS_ALLOWED_ORIGINS
         value: "https://medbot-frontend-iota.vercel.app"
 
       - key: NLTK_DATA
-        value: "/opt/render/nltk_data"
+        value: "/tmp/nltk_data"
 
       - key: PYTHON_VERSION
-        value: "3.12.0"
+        value: "3.11.9"
 
 databases:
   - name: medbot-db
