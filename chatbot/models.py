@@ -1,11 +1,16 @@
-# chatbot/models.py
 import uuid
 
 from django.contrib.auth.models import User
 from django.contrib.postgres.indexes import GinIndex
-from django.contrib.postgres.search import SearchVectorField
+from django.contrib.postgres.search import SearchVectorField, SearchVector
 from django.db import models
+from django.db.models.signals import post_save
+from django.dispatch import receiver
 
+
+# ─────────────────────────────────────────────────────────────
+# Core Medical Models
+# ─────────────────────────────────────────────────────────────
 
 class Disease(models.Model):
     name            = models.CharField(max_length=200)
@@ -24,6 +29,17 @@ class Disease(models.Model):
         return self.name
 
 
+@receiver(post_save, sender=Disease)
+def update_search_vector(sender, instance, **kwargs):
+    sender.objects.filter(pk=instance.pk).update(
+        search_vector=(
+            SearchVector('name', weight='A') +
+            SearchVector('common_symptoms', weight='B') +
+            SearchVector('description', weight='C')
+        )
+    )
+
+
 class Symptom(models.Model):
     name              = models.CharField(max_length=100, unique=True)
     alternative_names = models.TextField(blank=True, help_text="Comma-separated variations")
@@ -34,8 +50,11 @@ class Symptom(models.Model):
 
 
 class FirstAidProcedure(models.Model):
-    disease           = models.ForeignKey(Disease, on_delete=models.CASCADE,
-                                          related_name="first_aid_procedures")
+    disease           = models.ForeignKey(
+        Disease,
+        on_delete=models.CASCADE,
+        related_name="first_aid_procedures"
+    )
     title             = models.CharField(max_length=200)
     steps             = models.TextField(help_text="Step-by-step instructions (markdown)")
     warning_notes     = models.TextField(blank=True)
@@ -51,36 +70,45 @@ class EmergencyKeyword(models.Model):
         ("URGENT",   "Seek Care Within Hours"),
         ("CAUTION",  "Monitor Carefully"),
     ]
+
     keyword          = models.CharField(max_length=100, unique=True)
     severity         = models.CharField(max_length=20, choices=SEVERITY_CHOICES)
-    response_message = models.TextField(help_text="Message shown to the user")
+    response_message = models.TextField()
 
     def __str__(self):
         return f"{self.keyword} ({self.severity})"
 
 
+# ─────────────────────────────────────────────────────────────
+# User & Session Tracking
+# ─────────────────────────────────────────────────────────────
+
 class UserProfile(models.Model):
     AGE_CHOICES = [
-        ("0-12",    "Child (0-12)"),
-        ("13-17",   "Teen (13-17)"),
-        ("18-35",   "Young Adult (18-35)"),
-        ("36-50",   "Adult (36-50)"),
-        ("51+",     "Senior (51+)"),
+        ("0-12", "Child (0-12)"),
+        ("13-17", "Teen (13-17)"),
+        ("18-35", "Young Adult (18-35)"),
+        ("36-50", "Adult (36-50)"),
+        ("51+", "Senior (51+)"),
         ("unknown", "Prefer not to say"),
     ]
+
     GENDER_CHOICES = [
-        ("male",    "Male"),
-        ("female",  "Female"),
-        ("other",   "Other"),
+        ("male", "Male"),
+        ("female", "Female"),
+        ("other", "Other"),
         ("unknown", "Prefer not to say"),
     ]
 
     user           = models.OneToOneField(User, on_delete=models.CASCADE, null=True, blank=True)
-    session_id     = models.CharField(max_length=100, unique=True, default=uuid.uuid4)
+    session_id     = models.CharField(
+        max_length=100,
+        unique=True,
+        default=lambda: str(uuid.uuid4())
+    )
     age_group      = models.CharField(max_length=20, choices=AGE_CHOICES, default="unknown")
     gender         = models.CharField(max_length=20, choices=GENDER_CHOICES, default="unknown")
-    location       = models.CharField(max_length=200, blank=True,
-                                      help_text="City / Region in Kenya")
+    location       = models.CharField(max_length=200, blank=True)
     ip_address     = models.GenericIPAddressField(null=True, blank=True)
     user_agent     = models.TextField(blank=True)
     first_seen     = models.DateTimeField(auto_now_add=True)
@@ -93,8 +121,13 @@ class UserProfile(models.Model):
 
 class ChatSession(models.Model):
     session_id    = models.CharField(max_length=100, unique=True)
-    user_profile  = models.ForeignKey(UserProfile, on_delete=models.CASCADE,
-                                      null=True, blank=True, related_name="chat_sessions")
+    user_profile  = models.ForeignKey(
+        UserProfile,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="chat_sessions"
+    )
     created_at    = models.DateTimeField(auto_now_add=True)
     last_activity = models.DateTimeField(auto_now=True)
 
@@ -105,26 +138,50 @@ class ChatSession(models.Model):
 class ChatMessage(models.Model):
     ROLE_CHOICES = [("user", "User"), ("bot", "Bot")]
 
-    session            = models.ForeignKey(ChatSession, on_delete=models.CASCADE,
-                                           related_name="messages")
-    user_profile       = models.ForeignKey(UserProfile, on_delete=models.CASCADE,
-                                           null=True, blank=True, related_name="chat_messages")
+    session = models.ForeignKey(
+        ChatSession,
+        on_delete=models.CASCADE,
+        related_name="messages"
+    )
+    user_profile = models.ForeignKey(
+        UserProfile,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="chat_messages"
+    )
     role               = models.CharField(max_length=10, choices=ROLE_CHOICES)
     content            = models.TextField()
     timestamp          = models.DateTimeField(auto_now_add=True)
     emergency_detected = models.BooleanField(default=False)
 
+    class Meta:
+        indexes = [
+            models.Index(fields=["timestamp"]),
+            models.Index(fields=["session"]),
+        ]
+        ordering = ["-timestamp"]
+
     def __str__(self):
         return f"{self.role}: {self.content[:50]}"
 
 
+# ─────────────────────────────────────────────────────────────
+# Logs & Tracking
+# ─────────────────────────────────────────────────────────────
+
 class SymptomLog(models.Model):
-    user_profile     = models.ForeignKey(UserProfile, on_delete=models.CASCADE,
-                                         related_name="symptom_logs")
-    symptoms         = models.JSONField()
+    user_profile     = models.ForeignKey(UserProfile, on_delete=models.CASCADE, related_name="symptom_logs")
+    symptoms         = models.JSONField(default=list)
     raw_input        = models.TextField()
     matched_diseases = models.JSONField(default=list)
     timestamp        = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["timestamp"]),
+        ]
+        ordering = ["-timestamp"]
 
     def __str__(self):
         syms = self.symptoms[:3] if isinstance(self.symptoms, list) else []
@@ -132,9 +189,8 @@ class SymptomLog(models.Model):
 
 
 class EmergencyLog(models.Model):
-    user_profile           = models.ForeignKey(UserProfile, on_delete=models.CASCADE,
-                                                related_name="emergency_logs")
-    emergency_keywords     = models.JSONField()
+    user_profile           = models.ForeignKey(UserProfile, on_delete=models.CASCADE, related_name="emergency_logs")
+    emergency_keywords     = models.JSONField(default=list)
     severity               = models.CharField(max_length=20)
     raw_input              = models.TextField()
     location_shared        = models.BooleanField(default=False)
@@ -142,6 +198,13 @@ class EmergencyLog(models.Model):
     longitude              = models.FloatField(null=True, blank=True)
     nearby_hospitals_shown = models.IntegerField(default=0)
     timestamp              = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["severity"]),
+            models.Index(fields=["timestamp"]),
+        ]
+        ordering = ["-timestamp"]
 
     def __str__(self):
         return f"{self.user_profile} — {self.severity}: {self.emergency_keywords}"
@@ -156,15 +219,16 @@ class FirstAidFeedback(models.Model):
         (5, "5 — Extremely Helpful"),
     ]
 
-    user_profile   = models.ForeignKey(UserProfile, on_delete=models.CASCADE,
-                                       related_name="feedback")
-    symptom_log    = models.ForeignKey(SymptomLog, on_delete=models.SET_NULL,
-                                       null=True, blank=True)
+    user_profile   = models.ForeignKey(UserProfile, on_delete=models.CASCADE, related_name="feedback")
+    symptom_log    = models.ForeignKey(SymptomLog, on_delete=models.SET_NULL, null=True, blank=True)
     disease_name   = models.CharField(max_length=200)
     response_given = models.TextField(blank=True)
     rating         = models.IntegerField(choices=RATING_CHOICES, null=True, blank=True)
     feedback_text  = models.TextField(blank=True)
     timestamp      = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-timestamp"]
 
     def __str__(self):
         return f"{self.user_profile} — {self.disease_name}: {self.rating}"
@@ -182,7 +246,9 @@ class ChatAnalytics(models.Model):
     top_diseases         = models.JSONField(default=dict)
 
     class Meta:
-        indexes = [models.Index(fields=["date"])]
+        indexes = [
+            models.Index(fields=["date"]),
+        ]
 
     def __str__(self):
         return str(self.date)
