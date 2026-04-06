@@ -4,12 +4,6 @@ Management command: populate_kenya_data
 Populates the database with 50+ Kenyan diseases, symptoms, first-aid
 procedures, and emergency keywords.  Safe to re-run: clears then re-inserts.
 
-Fix 13: the original loop used `diseases_raw[key]` to look up values from an
-        anonymous dict that was already being iterated.  The pattern was
-        fragile (duplicate key reference, easy to break on a rename).
-        Rewritten as a clean `for key, (name, desc, syms) in DISEASE_DATA.items()`
-        loop with no back-references to the outer dict.
-
 Usage:
     python manage.py populate_kenya_data          # interactive confirmation
     python manage.py populate_kenya_data --force  # skip prompt (used in render.yaml)
@@ -62,7 +56,6 @@ class Command(BaseCommand):
         EmergencyKeyword.objects.all().delete()
 
         # ── SYMPTOMS ──────────────────────────────────────────────────────────
-        # Fix 13: plain dict → create; no back-reference needed
         SYMPTOM_DATA = {
             "fever":                ("fever",                         "high temperature,hot body,sweating,chills,joto,homa,feverish,night sweats"),
             "headache":             ("headache",                      "head pain,migraine,kichwa kuuma,throbbing head,maumivu ya kichwa"),
@@ -73,9 +66,9 @@ class Command(BaseCommand):
             "chest_pain":           ("chest pain",                    "chest discomfort,heart pain,tight chest,maumivu kifua"),
             "difficulty_breathing": ("difficulty breathing",          "shortness of breath,breathless,wheezing,kupumua shida,breathing fast"),
             "joint_pain":           ("joint pain",                    "joint ache,arthritis,knees hurt,maumivu viungo,painful joints"),
-            "muscle_pain":          ("muscle pain",                   "myalgia,body aches,sore muscles,mwili kuuma,whole body pain"),
+            "muscle_pain":          ("muscle pain",                   "myalgia,body aches,sore muscles,mwili kuuma,whole body pain,maumivu mwilini"),
             "rash":                 ("rash",                          "skin rash,red spots,itching,hives,skin bumps,upele"),
-            "abdominal_pain":       ("abdominal pain",                "stomach ache,belly pain,cramping,tumbo kuuma,stomach cramps"),
+            "abdominal_pain":       ("abdominal pain",                "stomach ache,belly pain,cramping,tumbo kuuma,stomach cramps,stomach pain"),
             "dehydration":          ("dehydration",                   "dry mouth,sunken eyes,thirsty,dark urine,no tears"),
             "confusion":            ("confusion",                     "disoriented,delirium,not acting normal,altered mental,not responding"),
             "burning_urination":    ("burning urination",             "pain when urinating,urine burns,mkojo kuuma,painful urination"),
@@ -101,14 +94,11 @@ class Command(BaseCommand):
             "pale_skin":            ("pale skin",                     "pallor,pale gums,white gums,pale conjunctiva,inner eyelids pale"),
             "itching":              ("itching",                       "intense itch,skin itching,genital itching,kuwasha,mwili kuwasha"),
             "discharge":            ("discharge",                     "genital discharge,pus,yellow discharge,green discharge,smelly discharge"),
-            "eye_pain":             ("eye pain",                      "red eyes,eye discharge,sticky eyes,macho kuuma"),
-            "ear_pain":             ("ear pain",                      "ear discharge,hearing loss,masikio kuuma,ear ache"),
-            "genital_sores":        ("genital sores",                 "genital ulcers,sores on genitals,painless sore"),
-            "heavy_bleeding":       ("heavy bleeding",                "abnormal bleeding,postpartum bleeding,heavy period,blood loss"),
-            "pelvic_pain":          ("pelvic pain",                   "lower pelvic pain,painful periods,menstrual cramps,period pain"),
-            "blisters":             ("skin blisters",                 "fluid-filled bumps,vesicles,water bumps,chickenpox spots"),
+            "eye_pain":             ("eye pain",                      "red eyes,eye discharge,eye swelling,macho kuuma,eyes red,sticky eyes"),
+            "ear_pain":             ("ear pain",                      "ear discharge,hearing loss,masikio kuuma,ears ringing,ear ache"),
             "loss_appetite":        ("loss of appetite",              "not eating,no appetite,chakula hakivutii,cannot eat"),
             "fast_breathing":       ("fast breathing",                "rapid breathing,tachypnea,breathing quickly,breathing over 60 times"),
+            "stomach_ache":         ("stomach ache",                  "tummy hurts,belly ache,tumbo maumivu,indigestion"),
         }
 
         S = {}
@@ -116,10 +106,9 @@ class Command(BaseCommand):
             S[key] = Symptom.objects.create(name=name, alternative_names=alts)
 
         # ── DISEASES ──────────────────────────────────────────────────────────
-        # Fix 13: each tuple is (name, description, common_symptoms).
-        # Iterated directly — no fragile back-reference to an outer variable.
+        # Each tuple: (display_name, description, common_symptoms_text)
         DISEASE_DATA = {
-            # ── Mosquito-borne ─────────────────────────────────────────────
+            # ── Mosquito-borne ────────────────────────────────────────────────
             "malaria": (
                 "Malaria",
                 "Parasitic disease spread by female Anopheles mosquitoes. Leading cause of hospital "
@@ -163,7 +152,7 @@ class Command(BaseCommand):
                 "Causes progressive neurological damage, coma, and death.",
                 "fever, headache, joint pain, fatigue, swollen lymph nodes, confusion, sleep disturbance",
             ),
-            # ── Waterborne / Diarrheal ─────────────────────────────────────
+            # ── Waterborne / Diarrheal ────────────────────────────────────────
             "cholera": (
                 "Cholera",
                 "Severe bacterial diarrhoeal disease from contaminated water. "
@@ -214,7 +203,7 @@ class Command(BaseCommand):
                 "High risk after floods. Can cause kidney and liver failure.",
                 "fever, headache, muscle pain, vomiting, jaundice, red eyes, rash",
             ),
-            # ── Respiratory ────────────────────────────────────────────────
+            # ── Respiratory ───────────────────────────────────────────────────
             "pneumonia": (
                 "Pneumonia",
                 "Lung infection causing fluid buildup. Second leading killer of children under 5.",
@@ -251,7 +240,7 @@ class Command(BaseCommand):
                 "Respiratory illness from SARS-CoV-2. Ranges from mild cold to fatal pneumonia.",
                 "fever, cough, difficulty breathing, fatigue, headache, loss of taste, sore throat, muscle pain",
             ),
-            # ── Parasitic ──────────────────────────────────────────────────
+            # ── Parasitic ─────────────────────────────────────────────────────
             "worms": (
                 "Intestinal Worms (Helminthiasis)",
                 "Parasitic worm infections from contaminated soil or food. Common in school-age children.",
@@ -268,7 +257,7 @@ class Command(BaseCommand):
                 "Endemic in Turkana, Baringo, Isiolo, and Wajir counties.",
                 "prolonged fever, weight loss, pale skin, abdominal swelling, fatigue, jaundice",
             ),
-            # ── STIs & Reproductive ─────────────────────────────────────────
+            # ── STIs & Reproductive ───────────────────────────────────────────
             "hiv": (
                 "HIV/AIDS",
                 "Viral infection attacking the immune system. ~1.5 million Kenyans live with HIV. "
@@ -288,556 +277,557 @@ class Command(BaseCommand):
             "chlamydia": (
                 "Chlamydia",
                 "Most common bacterial STI — often silent. Can cause infertility if untreated.",
-                "discharge, burning urination, pelvic pain, often no symptoms",
+                "discharge, burning urination, pelvic pain",
             ),
             "pid": (
                 "Pelvic Inflammatory Disease (PID)",
                 "Infection of female reproductive organs from untreated STIs. Major cause of infertility.",
                 "pelvic pain, fever, discharge, painful periods, painful intercourse, heavy bleeding",
             ),
-            # ── Skin ───────────────────────────────────────────────────────
+            # ── Skin ──────────────────────────────────────────────────────────
             "ringworm": (
                 "Ringworm (Tinea)",
                 "Fungal skin infection causing circular patches. Very common in schools.",
-                "circular rash, itching, redness, scaling, hair loss if scalp",
+                "circular rash, itching, redness, scaling, hair loss",
             ),
             "scabies": (
                 "Scabies",
                 "Skin infestation by mites. Highly contagious. Common in overcrowded households.",
-                "itching, rash, burrow marks between fingers, redness, sores from scratching",
+                "itching, rash, redness, sores from scratching",
             ),
             "chickenpox": (
                 "Chickenpox (Varicella)",
                 "Highly contagious viral disease causing itchy fluid-filled blisters.",
-                "fever, itching, skin blisters, fatigue, headache, rash starting on face",
+                "fever, itching, skin blisters, fatigue, headache, rash",
             ),
             "measles": (
                 "Measles",
                 "Highly contagious viral disease. Outbreaks still occur in Kenya. "
                 "Can cause pneumonia, blindness, and brain damage.",
-                "fever, cough, runny nose, red eyes, rash starting from face, white spots in mouth",
+                "fever, cough, runny nose, red eyes, rash, fatigue, headache",
             ),
             "impetigo": (
                 "Impetigo",
-                "Contagious bacterial skin infection common in children. Honey-coloured crusted sores.",
-                "skin sores, honey-coloured crusts, redness, itching, blisters",
+                "Highly contagious bacterial skin infection. Common in children.",
+                "skin sores, blisters, redness, crusting, itching",
             ),
-            "cellulitis": (
-                "Cellulitis",
-                "Deep bacterial skin infection. Can spread rapidly to cause life-threatening sepsis.",
-                "redness, swelling, warmth, pain, fever, skin blistering, red streaks",
-            ),
-            "skin_infection": (
-                "Wound / Skin Infection",
-                "Bacterial infection of wounds from cuts, bites, or sores.",
-                "redness, swelling, wound, discharge, fever, pain, warmth around wound",
-            ),
-            # ── NCDs ───────────────────────────────────────────────────────
+            # ── Non-communicable ─────────────────────────────────────────────
             "hypertension": (
-                "High Blood Pressure (Hypertension)",
-                "Chronic condition where blood pressure is persistently elevated. Affects 26% of Kenyan adults.",
-                "severe headache, blurred vision, chest pain, difficulty breathing, nosebleed, dizziness",
+                "Hypertension (High Blood Pressure)",
+                "Silent killer affecting 1 in 3 Kenyan adults. Major risk factor for stroke and heart attack.",
+                "severe headache, blurred vision, nosebleed, dizziness, chest pain, shortness of breath",
             ),
-            "diabetes": (
-                "Diabetes Mellitus",
-                "Blood sugar chronically too high. Type 2 rapidly increasing in Kenya. "
-                "Can cause blindness, kidney failure, and amputations.",
-                "excessive thirst, frequent urination, weight loss, fatigue, blurred vision, slow healing, numbness in feet",
+            "diabetes_type2": (
+                "Type 2 Diabetes",
+                "Chronic metabolic disorder. Rapidly increasing in Kenya due to urbanisation and diet changes.",
+                "excessive thirst, frequent urination, weight loss, fatigue, blurred vision, slow-healing wounds, numbness in feet",
             ),
-            "heart_disease": (
-                "Heart Disease (Coronary Artery Disease)",
-                "Narrowing of arteries supplying the heart. Leading cause of death in urban Kenya.",
-                "chest pain, shortness of breath, fatigue, swelling in legs, palpitations, dizziness",
+            "heart_attack": (
+                "Heart Attack (Myocardial Infarction)",
+                "Blocked coronary artery causing heart muscle death. Requires emergency care.",
+                "chest pain, chest pressure, left arm pain, shortness of breath, sweating, nausea, dizziness",
             ),
             "stroke": (
-                "Stroke (Cerebrovascular Accident)",
-                "Brain damage from blocked or burst blood vessel. Hypertension is the main risk factor. "
-                "Each minute without treatment kills 1.9 million brain cells.",
-                "sudden weakness on one side, facial drooping, slurred speech, severe headache, confusion, vision loss",
-            ),
-            "epilepsy": (
-                "Epilepsy",
-                "Neurological condition causing recurrent seizures. Often linked to cerebral malaria or TB.",
-                "convulsions, loss of consciousness, staring episodes, confusion after episode, jerking",
-            ),
-            "sickle_cell": (
-                "Sickle Cell Disease",
-                "Inherited blood disorder. Common in Lake Victoria basin.",
-                "severe pain crises, fatigue, pale skin, jaundice, swelling in hands and feet",
+                "Stroke",
+                "Brain injury from blocked or ruptured blood vessel. Leading cause of disability in Kenya.",
+                "sudden face drooping, arm weakness, speech difficulty, severe headache, confusion, vision loss",
             ),
             "anaemia": (
                 "Anaemia",
-                "Low red blood cell count. Main causes are malaria, worms, and iron deficiency. "
-                "Severe in pregnant women and young children.",
-                "fatigue, pale skin, dizziness, shortness of breath, fast heart rate, headache",
+                "Low red blood cell count. Very common in Kenya, especially in women and children. "
+                "Often caused by iron deficiency, malaria, or worm infections.",
+                "fatigue, pale skin, pale gums, shortness of breath, dizziness, cold hands, headache",
             ),
-            # ── Eye & ENT ──────────────────────────────────────────────────
+            "malnutrition": (
+                "Malnutrition",
+                "Deficiency of essential nutrients. Common in arid and semi-arid counties.",
+                "weight loss, fatigue, pale skin, swelling of feet and face, poor growth, weakness",
+            ),
+            # ── Neurological / Other ─────────────────────────────────────────
+            "meningitis": (
+                "Meningitis",
+                "Life-threatening inflammation of brain membranes. Bacterial meningitis can kill in 24 hours.",
+                "severe headache, stiff neck, fever, light sensitivity, vomiting, confusion, convulsions, rash",
+            ),
+            "epilepsy": (
+                "Epilepsy",
+                "Chronic neurological condition causing recurrent seizures. Highly stigmatised in Kenya.",
+                "convulsions, loss of consciousness, muscle jerking, confusion after episode, fatigue",
+            ),
+            # ── Eye & ENT ────────────────────────────────────────────────────
             "conjunctivitis": (
                 "Conjunctivitis (Pink Eye)",
-                "Inflammation of the eye conjunctiva. Highly contagious in schools.",
-                "red eyes, eye discharge, itching in eyes, swollen eyelids, eye pain",
+                "Highly contagious eye infection. Can be viral, bacterial, or allergic.",
+                "red eyes, eye discharge, eye pain, itching, tearing, swollen eyelids",
             ),
             "trachoma": (
                 "Trachoma",
-                "Chronic bacterial eye disease. Leading infectious cause of blindness. "
+                "Bacterial eye infection — leading infectious cause of blindness globally. "
                 "Endemic in arid parts of Kenya.",
-                "eye discharge, red eyes, itching in eyes, eye pain, vision loss",
+                "eye discharge, red eyes, eye pain, eyelid scarring, light sensitivity",
             ),
             "otitis_media": (
                 "Ear Infection (Otitis Media)",
-                "Middle ear infection, common in children under 5. Can cause permanent hearing loss.",
-                "ear pain, fever, ear discharge, difficulty hearing, tugging at ear",
+                "Middle ear infection common in children. Can lead to permanent hearing loss if untreated.",
+                "ear pain, fever, hearing loss, discharge from ear, irritability, headache",
             ),
-            "tonsillitis": (
-                "Tonsillitis",
-                "Inflammation of tonsils. Rheumatic fever is a serious complication if untreated.",
-                "sore throat, fever, difficulty swallowing, swollen neck glands, bad breath",
-            ),
-            # ── Maternal & Neonatal ────────────────────────────────────────
-            "eclampsia": (
-                "Eclampsia / Pre-eclampsia",
-                "Serious pregnancy complication. Eclampsia = seizures. "
-                "Leading cause of maternal death in Kenya.",
-                "severe headache, blurred vision, swollen face and hands, convulsions, abdominal pain",
-            ),
-            "postpartum_haemorrhage": (
-                "Postpartum Haemorrhage (PPH)",
-                "Excessive bleeding after childbirth. Leading cause of maternal mortality in Kenya.",
-                "heavy bleeding after delivery, dizziness, weakness, rapid heart rate, pale skin",
-            ),
-            "mastitis": (
-                "Mastitis",
-                "Breast infection during breastfeeding. Can develop into abscess.",
-                "breast pain, swelling, redness, fever, fatigue, warmth in breast",
-            ),
-            "neonatal_sepsis": (
-                "Neonatal Sepsis",
-                "Life-threatening blood infection in newborns. Major cause of newborn deaths.",
-                "fever or low temperature in newborn, difficulty feeding, convulsions, jaundice, lethargy",
-            ),
-            # ── Malnutrition ───────────────────────────────────────────────
-            "malnutrition": (
-                "Malnutrition (Kwashiorkor / Marasmus)",
-                "Severe childhood malnutrition. Common in arid regions and drought areas.",
-                "swelling, weight loss, muscle wasting, fatigue, irritability, pale skin, poor growth",
-            ),
-            # ── Other ──────────────────────────────────────────────────────
-            "meningitis": (
-                "Meningitis",
-                "Inflammation of brain coverings. Medical emergency. "
-                "Can cause death or brain damage within hours.",
-                "severe headache, fever, stiff neck, confusion, vomiting, sensitivity to light, rash",
-            ),
+            # ── Urinary ──────────────────────────────────────────────────────
             "uti": (
                 "Urinary Tract Infection (UTI)",
-                "Infection of the bladder or urethra. More common in women.",
-                "burning urination, frequent urination, lower back pain, blood in urine, lower abdominal pain",
+                "Bacterial infection of the bladder or kidneys. Very common in women.",
+                "burning urination, frequent urination, lower back pain, cloudy urine, fever, pelvic pain",
             ),
-            "brucellosis": (
-                "Brucellosis",
-                "Bacterial zoonosis from livestock or unpasteurised dairy. Common in pastoral communities.",
-                "fever, sweating, fatigue, joint pain, lower back pain, headache, muscle pain",
+            "kidney_stones": (
+                "Kidney Stones",
+                "Mineral deposits in the kidneys causing intense pain when passing.",
+                "severe back pain, side pain, painful urination, blood in urine, nausea, vomiting, fever",
+            ),
+            # ── Maternal/Child Health ─────────────────────────────────────────
+            "malaria_pregnancy": (
+                "Malaria in Pregnancy",
+                "High-risk form of malaria. Can cause maternal anaemia, miscarriage, and low birth weight.",
+                "fever, chills, headache, fatigue, anaemia, abdominal pain, vomiting",
+            ),
+            "pre_eclampsia": (
+                "Pre-eclampsia",
+                "Dangerous blood pressure condition in pregnancy. Requires immediate medical attention.",
+                "severe headache, blurred vision, swelling of face and hands, upper abdominal pain, vomiting",
+            ),
+            # ── Injuries / Wounds ─────────────────────────────────────────────
+            "snake_bite": (
+                "Snake Bite",
+                "Medical emergency in rural Kenya. Over 4,000 bites per year. Requires antivenin.",
+                "bite wound, swelling, pain, vomiting, difficulty breathing, bleeding, confusion",
+            ),
+            "wound_infection": (
+                "Wound Infection / Sepsis",
+                "Bacterial infection of a wound that can progress to life-threatening sepsis.",
+                "wound redness, wound swelling, pus, fever, warmth around wound, pain, red streaks",
+            ),
+            "burns": (
+                "Burns",
+                "Common injury, especially from open cooking fires in rural Kenya.",
+                "skin redness, blistering, pain, swelling, charred skin in severe cases",
             ),
         }
 
-        # Fix 13: clean loop — no ambiguous back-reference
+        # ── Create Disease objects and link Symptoms ───────────────────────────
         D = {}
         for key, (name, desc, syms) in DISEASE_DATA.items():
-            D[key] = Disease.objects.create(name=name, description=desc, common_symptoms=syms)
+            d = Disease.objects.create(
+                name=name,
+                description=desc,
+                common_symptoms=syms,
+            )
+            D[key] = d
 
-        # ── FIRST AID PROCEDURES ──────────────────────────────────────────────
-        FA = [
-            (D["malaria"], "Malaria First Aid",
-             "1. PARACETAMOL: Give paracetamol for fever. Do NOT give aspirin to children.\n\n"
-             "2. COOL DOWN: Sponge with room-temperature water if very hot. Do not use ice.\n\n"
-             "3. FLUIDS: Drink plenty of clean water, oral rehydration salts, or soup.\n\n"
-             "4. REST: Lie down under an insecticide-treated mosquito net.\n\n"
-             "5. TEST AND TREAT: Go to clinic for a rapid diagnostic test. "
-             "Do not take anti-malarials without testing first.",
-             "Severe malaria (confusion, seizures, inability to drink) can kill within 24 hours.",
-             "Go to hospital IMMEDIATELY if:\n• Unconscious or confused\n• Cannot keep fluids down\n"
-             "• Seizures\n• Breathing difficulty\n• Child under 5 or pregnant woman\n• Pale or yellow skin"),
+            # Link Symptom objects to disease via M2M
+            syms_lower = [s.strip().lower() for s in syms.split(",")]
+            for sym_key, sym_obj in S.items():
+                # Match by canonical name or any alternative
+                if sym_obj.name.lower() in syms_lower:
+                    d.symptoms.add(sym_obj)
+                    continue
+                for alt in sym_obj.alternative_names.split(","):
+                    if alt.strip().lower() in syms_lower:
+                        d.symptoms.add(sym_obj)
+                        break
 
-            (D["dengue"], "Dengue First Aid",
-             "1. COMPLETE REST: Bed rest throughout illness.\n\n"
-             "2. FLUIDS: Drink 2–3 litres of ORS or clean water daily.\n\n"
-             "3. PARACETAMOL ONLY: For fever and pain. "
-             "NEVER give ibuprofen, aspirin, or diclofenac — they cause bleeding.\n\n"
-             "4. WATCH FOR DANGER SIGNS: Most dangerous time is when fever drops on day 3–5.",
-             "NEVER use aspirin or ibuprofen in dengue — they can cause fatal bleeding.",
-             "Go to hospital immediately if:\n• Severe belly pain\n• Blood in vomit, stool, or urine\n"
-             "• Bleeding gums or nose\n• Cold, clammy skin\n• Cannot keep fluids down"),
+        # ── FIRST-AID PROCEDURES ──────────────────────────────────────────────
+        FA_DATA = [
+            ("malaria", "Malaria First Aid",
+             "1. Rest the patient in a cool, shaded area.\n"
+             "2. Give paracetamol (NOT aspirin or ibuprofen) to reduce fever — follow dosing on pack.\n"
+             "3. Ensure adequate oral fluids — water, oral rehydration solution (ORS), or juice.\n"
+             "4. Use a damp cloth on the forehead to manage high fever.\n"
+             "5. Seek diagnostic testing (RDT or blood smear) at the nearest health facility IMMEDIATELY.\n"
+             "6. Do NOT self-treat with antimalarials without a confirmed diagnosis.\n"
+             "7. Complete the full course of prescribed antimalarials — even if the patient feels better.",
+             "Do NOT give aspirin or ibuprofen to children with fever — risk of Reye's syndrome. "
+             "Do NOT delay going to hospital — cerebral malaria can be fatal within hours.",
+             "Go to hospital immediately if: confusion, seizures, very high fever, inability to drink, "
+             "repeated vomiting, laboured breathing, or pallor (pale gums/skin)."),
 
-            (D["cholera"], "Cholera First Aid",
-             "1. ORS IMMEDIATELY: Start oral rehydration salts at once in small continuous sips.\n\n"
-             "2. HOME ORS: 1 litre boiled water + 6 teaspoons sugar + ½ teaspoon salt.\n\n"
-             "3. VOLUME: An adult with cholera can lose 1 litre per hour — keep drinking.\n\n"
-             "4. HOSPITAL: Severe cholera needs IV fluids. Get there fast.\n\n"
-             "5. ISOLATE: Boil all drinking water.",
-             "Cholera can kill in hours. ORS saves lives — start immediately.",
-             "Go to hospital IMMEDIATELY if:\n• Cannot keep fluids down\n• Severe dehydration "
-             "(sunken eyes, no urine)\n• Continuous rice-water diarrhoea\n• Confusion or extreme weakness"),
+            ("dengue", "Dengue Fever First Aid",
+             "1. Rest completely — avoid any strenuous activity.\n"
+             "2. Drink plenty of fluids: water, ORS, coconut water, or fresh juice.\n"
+             "3. Give paracetamol for fever and pain — follow dosing instructions.\n"
+             "4. Use a damp cloth or fan to cool the patient.\n"
+             "5. Monitor for warning signs of severe dengue (see below).\n"
+             "6. Mosquito net rest prevents infecting others via mosquitoes.",
+             "NEVER give aspirin or ibuprofen — they increase bleeding risk significantly. "
+             "There is no specific antiviral treatment; supportive care is essential.",
+             "Go to hospital immediately if: severe abdominal pain, persistent vomiting, bleeding gums or nose, "
+             "blood in urine or stool, rapid breathing, sudden drop in temperature, or extreme fatigue."),
 
-            (D["typhoid"], "Typhoid First Aid",
-             "1. REST: Complete rest at home.\n\n"
-             "2. FLUIDS: Boiled water, ORS, clear soups, diluted fruit juice.\n\n"
-             "3. SOFT FOODS: Porridge, ugali, rice, mashed potatoes.\n\n"
-             "4. HYGIENE: Strict handwashing. Separate toilet or clean with bleach.\n\n"
-             "5. ANTIBIOTICS: Typhoid requires prescription antibiotics. Visit a clinic.",
-             "Untreated typhoid can perforate the intestines — a surgical emergency.",
-             "Go to hospital if:\n• Fever continues more than 5 days\n• Sudden severe abdominal pain\n"
-             "• Confusion or delirium\n• Cannot eat or drink\n• Pale or jaundiced"),
+            ("cholera", "Cholera Emergency First Aid",
+             "1. Start Oral Rehydration Therapy (ORT) IMMEDIATELY — this is the most important step.\n"
+             "2. Make ORS: dissolve 1 sachet (or 1 teaspoon salt + 8 teaspoons sugar) in 1 litre clean water.\n"
+             "3. Give small, frequent sips — 200–400 ml after each loose stool.\n"
+             "4. Continue breastfeeding infants.\n"
+             "5. Transport patient to nearest health facility urgently.\n"
+             "6. Isolate patient's faeces — wash hands with soap thoroughly.",
+             "Cholera can kill by dehydration within hours. Do NOT wait to start ORT while arranging transport. "
+             "Avoid home remedies that delay treatment.",
+             "Transport to hospital IMMEDIATELY. IV fluids are needed for severe cases. "
+             "Children and elderly are most at risk of rapid deterioration."),
 
-            (D["pneumonia"], "Pneumonia First Aid",
-             "1. SIT UPRIGHT: Help person sit up — do not let them lie flat.\n\n"
-             "2. FRESH AIR: Open windows. Keep room warm but well-ventilated.\n\n"
-             "3. WARM FLUIDS: Water, tea, or soup frequently in small amounts.\n\n"
-             "4. PARACETAMOL: For fever and discomfort.\n\n"
-             "5. HOSPITAL: Pneumonia needs antibiotics from a clinician.",
-             "Pneumonia can be fatal in children under 5 and the elderly within days.",
-             "Go to hospital immediately if:\n• Breathing faster than normal\n• Ribs visible with each breath\n"
-             "• Lips or fingernails blue\n• Child cannot eat, drink, or breastfeed"),
+            ("typhoid", "Typhoid Fever First Aid",
+             "1. Keep the patient at strict bed rest.\n"
+             "2. Give plenty of cool, clean fluids to prevent dehydration.\n"
+             "3. Administer paracetamol for fever control.\n"
+             "4. Feed soft, easily digestible foods — avoid raw vegetables.\n"
+             "5. Strict handwashing with soap for patient and carers.\n"
+             "6. Seek medical care for prescription antibiotics — essential for cure.",
+             "Typhoid can cause intestinal perforation — a surgical emergency. "
+             "Never give anti-diarrhoeal drugs. Do not stop antibiotics early.",
+             "Go to hospital immediately if: extreme abdominal pain and rigidity (perforation), "
+             "loss of consciousness, very high fever, difficulty breathing, or no improvement after 3 days of antibiotics."),
 
-            (D["tuberculosis"], "TB Care and Infection Control",
-             "1. CLINIC IMMEDIATELY: TB requires 6 months of treatment.\n\n"
-             "2. COVER COUGH: Always cough into elbow or tissue.\n\n"
-             "3. NUTRITION: Eat eggs, beans, and vegetables to support immunity.\n\n"
-             "4. COMPLETE TREATMENT: Never stop TB drugs early — stopping causes drug resistance.\n\n"
-             "5. FAMILY TESTING: All close contacts should be screened.",
-             "Drug-resistant TB develops if treatment is stopped early. Never skip doses.",
-             "Go to clinic if:\n• Coughing blood\n• High fever\n• Severe weight loss\n• Night sweats lasting weeks"),
+            ("pneumonia", "Pneumonia First Aid",
+             "1. Keep the patient upright or semi-sitting — this eases breathing.\n"
+             "2. Ensure the room is well-ventilated.\n"
+             "3. Keep the patient warm but not overheated.\n"
+             "4. Encourage slow, deep breaths.\n"
+             "5. Give paracetamol for fever.\n"
+             "6. Ensure adequate hydration with small, frequent sips.\n"
+             "7. SEEK MEDICAL CARE URGENTLY — pneumonia requires antibiotics.",
+             "Do not give cough suppressants — coughing helps clear the lungs. "
+             "Antibiotics must be prescribed by a health worker.",
+             "Go to hospital immediately if: breathing rate over 50/min in adults or 60/min in infants, "
+             "blue lips or fingernails (cyanosis), confusion, inability to drink, or chest in-drawing."),
 
-            (D["meningitis"], "Meningitis First Aid — EMERGENCY",
-             "1. HOSPITAL NOW: Meningitis is a life-threatening emergency. Do not wait.\n\n"
-             "2. KEEP COMFORTABLE: Keep person calm and still while travelling to hospital.\n\n"
-             "3. NOTHING BY MOUTH: Do not give food or drink if confused or unconscious.\n\n"
-             "4. GLASS TEST: Press a glass on any rash. If rash does not fade — rush to hospital.",
-             "MENINGITIS CAN CAUSE DEATH OR BRAIN DAMAGE WITHIN HOURS.",
-             "GO TO HOSPITAL IMMEDIATELY if:\n• Severe headache + fever + stiff neck\n• Confusion\n"
-             "• Non-blanching rash\n• Seizures\n• Sensitivity to light"),
+            ("tuberculosis", "Tuberculosis (TB) First Aid & Support",
+             "1. Encourage the patient to seek TB testing at the nearest health facility — it is FREE in Kenya.\n"
+             "2. Isolate the patient in a well-ventilated room — open windows, avoid crowded spaces.\n"
+             "3. Patient should wear a surgical mask when around others.\n"
+             "4. Provide nutritious meals — TB causes weight loss and weakens immunity.\n"
+             "5. Support the patient to complete the FULL 6-month treatment course.\n"
+             "6. All household contacts should get tested.",
+             "TB treatment is free in all Kenyan public health facilities. "
+             "Stopping treatment early causes drug-resistant TB which is much harder to treat. "
+             "Do NOT give herbal remedies as a substitute for prescribed treatment.",
+             "Seek medical care if: coughing blood, extreme weight loss, night sweats, or fever lasting more than 3 weeks."),
 
-            (D["acute_diarrhea"], "Diarrhoea and ORS Guide",
-             "1. ORS IMMEDIATELY: Start oral rehydration salts at once.\n\n"
-             "2. HOME ORS: 1 litre boiled water + 6 teaspoons sugar + ½ teaspoon salt.\n\n"
-             "3. FEED: Continue normal feeding — bananas, rice, porridge, ugali.\n\n"
-             "4. BREASTFEED: Continue breastfeeding babies. Give ORS between feeds.\n\n"
-             "5. ZINC: Zinc tablets for 10–14 days in children reduce severity.\n\n"
-             "6. HANDS: Wash with soap after every bathroom visit.",
-             "Dehydration is the main killer. ORS saves lives.",
-             "Go to hospital if:\n• Blood in stool\n• Cannot keep fluids down\n• High fever\n• Very weak or confused"),
+            ("meningitis", "Meningitis Emergency First Aid",
+             "1. CALL FOR EMERGENCY TRANSPORT IMMEDIATELY — meningitis is a medical emergency.\n"
+             "2. Keep the patient still and calm — avoid bright lights and noise.\n"
+             "3. If conscious, give paracetamol for fever.\n"
+             "4. Monitor breathing and consciousness at all times.\n"
+             "5. Place unconscious patient in recovery position.\n"
+             "6. Do NOT give anything by mouth if the patient is vomiting or unconscious.",
+             "Bacterial meningitis can cause death within 24 hours or permanent brain damage. "
+             "Do NOT delay seeking emergency medical care under any circumstances.",
+             "This is a MEDICAL EMERGENCY. Go to hospital by the fastest means available. "
+             "Dial 999 or 112. Antibiotics must be given by IV in hospital — there is no effective home treatment."),
 
-            (D["uti"], "UTI First Aid",
-             "1. WATER: Drink 2–3 litres of clean water daily to flush bacteria.\n\n"
-             "2. HYGIENE: Wipe from front to back after toilet.\n\n"
-             "3. DO NOT HOLD: Urinate whenever you feel the urge.\n\n"
-             "4. PARACETAMOL: For pain relief if needed.\n\n"
-             "5. CLINIC: UTI needs antibiotics. Visit a clinic.",
-             "Untreated UTI can spread to kidneys causing pyelonephritis.",
-             "Go to hospital if:\n• Fever with chills\n• Severe back or side pain\n• Blood in urine\n• Pregnant woman"),
+            ("upper_respiratory", "Upper Respiratory Infection (Cold/Flu) First Aid",
+             "1. Rest at home — do not go to work or school while symptomatic.\n"
+             "2. Drink plenty of warm fluids: water, warm water with lemon and honey, or soup.\n"
+             "3. Gargle with warm salt water for sore throat.\n"
+             "4. Use steam inhalation for nasal congestion.\n"
+             "5. Paracetamol or ibuprofen for fever and pain — follow dosing.\n"
+             "6. Wash hands frequently to prevent spread.",
+             "Antibiotics do NOT work against viral infections — do not pressure doctors for them. "
+             "Do not give aspirin to children under 16.",
+             "Seek medical care if: fever above 39°C, breathing difficulty, symptoms worsen after 7 days, "
+             "chest pain, or confusion."),
 
-            (D["upper_respiratory"], "Cold / Flu First Aid",
-             "1. REST: Stay home and rest.\n\n"
-             "2. WARM FLUIDS: Tea with lemon and honey, warm soup, or water.\n\n"
-             "3. STEAM: Inhale steam — add eucalyptus if available.\n\n"
-             "4. SALT GARGLE: Gargle warm salt water for sore throat 3 times daily.\n\n"
-             "5. PARACETAMOL: For fever and body aches.\n\n"
-             "6. COVER COUGH: Use elbow or tissue. Wash hands frequently.",
-             "Viral colds cannot be cured by antibiotics.",
-             "Go to hospital if:\n• Difficulty breathing\n• Chest pain\n• Fever more than 3 days\n• Child breathing fast"),
+            ("influenza", "Influenza First Aid",
+             "1. Rest completely — flu requires more rest than a common cold.\n"
+             "2. Drink plenty of fluids to prevent dehydration.\n"
+             "3. Paracetamol or ibuprofen for fever and body aches.\n"
+             "4. Stay home to avoid spreading influenza.\n"
+             "5. Eat easily digestible foods.\n"
+             "6. Consider annual flu vaccination for prevention.",
+             "Never give aspirin to children — Reye's syndrome risk. "
+             "High-risk groups (elderly, pregnant, diabetic) should seek medical care promptly.",
+             "Seek medical care if: persistent high fever, breathing difficulty, chest pain, "
+             "confusion, or no improvement after 5 days."),
 
-            (D["skin_infection"], "Wound and Skin Infection First Aid",
-             "1. CLEAN: Wash wound with clean water and mild soap for 5–10 minutes.\n\n"
-             "2. ANTISEPTIC: Apply Dettol, betadine, or hydrogen peroxide.\n\n"
-             "3. COVER: Cover with clean dry dressing. Change daily.\n\n"
-             "4. ELEVATE: Raise wound if on arm or leg to reduce swelling.\n\n"
-             "5. TETANUS: Wounds from metal, soil, or animals need a tetanus shot.",
-             "Animal bites need immediate hospital assessment for rabies risk.",
-             "Go to hospital if:\n• Redness spreading around wound\n• Pus or yellow discharge\n• Fever\n• Red streaks from wound"),
+            ("asthma", "Asthma Attack First Aid",
+             "1. Sit the patient upright — do NOT lay them down.\n"
+             "2. Give reliever inhaler (salbutamol/Ventolin) — 4–6 puffs via spacer or direct.\n"
+             "3. Reassure the patient — keep them calm.\n"
+             "4. Remove from the trigger (smoke, dust, pollen) if present.\n"
+             "5. If no improvement in 5–10 minutes, give another 4–6 puffs.\n"
+             "6. If no improvement after 3 rounds — call emergency services.",
+             "NEVER give a sedative to an asthmatic patient. "
+             "Do not leave the patient alone during an attack.",
+             "Call 999 or 112 if: lips or fingernails turn blue, patient cannot speak full sentences, "
+             "reliever inhaler has no effect, or patient is exhausted from breathing effort."),
 
-            (D["hypertension"], "High Blood Pressure Self-Care",
-             "1. STAY CALM: Sit quietly and breathe deeply for 10 minutes.\n\n"
-             "2. SALT: Reduce salt — no extra added to food, avoid crisps and salted fish.\n\n"
-             "3. MEDICINE: Take BP medicine every day without fail. Never skip even one dose.\n\n"
-             "4. TOBACCO: Stop smoking and chewing miraa.\n\n"
-             "5. EXERCISE: Walk 30 minutes daily.\n\n"
-             "6. CLINIC: Get blood pressure checked at least every 3 months.",
-             "BP medicine must be taken for life. Stopping suddenly causes dangerous rebound.",
-             "Go to hospital immediately if:\n• Severe headache that will not stop\n• Blurred vision\n• Chest pain\n• Weakness on one side"),
+            ("heart_attack", "Heart Attack Emergency First Aid",
+             "1. CALL 999 OR 112 IMMEDIATELY.\n"
+             "2. Sit the patient in a comfortable position — semi-reclined, not flat.\n"
+             "3. Loosen tight clothing around the neck and chest.\n"
+             "4. If the patient is not allergic to aspirin and can swallow — give 300mg aspirin to chew slowly.\n"
+             "5. Keep the patient calm and still.\n"
+             "6. If the patient becomes unconscious and stops breathing — start CPR.\n"
+             "7. Do NOT leave the patient alone.",
+             "This is a LIFE-THREATENING EMERGENCY. Every minute of delay increases heart damage. "
+             "Do NOT give aspirin if the patient is allergic or has bleeding disorders.",
+             "This is a MEDICAL EMERGENCY. Call emergency services and go to hospital by the fastest means. "
+             "Do not drive yourself to hospital during a heart attack."),
 
-            (D["diabetes"], "Diabetes Self-Care",
-             "1. FOOD: Regular small meals. Avoid sugar, soda, cakes, mandazi, white bread.\n\n"
-             "2. EXERCISE: Walk daily — helps the body use sugar better.\n\n"
-             "3. MEDICINE: Take diabetes medicines at the right time every day.\n\n"
-             "4. FEET: Check feet every day for cuts or sores — diabetics heal slowly.\n\n"
-             "5. MONITOR: Regular blood sugar tests at the clinic.",
-             "Any foot wound in a diabetic person must be checked at a clinic the same day.",
-             "Go to hospital immediately if:\n• Confusion or drowsiness\n• Fruity sweet smell on breath\n• Unconscious\n• Infected foot wound"),
+            ("stroke", "Stroke Emergency First Aid — FAST",
+             "1. Use FAST test: Face drooping, Arm weakness, Speech difficulty, Time to call 999/112.\n"
+             "2. CALL 999 OR 112 IMMEDIATELY — note the exact time symptoms started.\n"
+             "3. Keep the patient calm and still — do NOT give food or water.\n"
+             "4. Lay the patient on their side if unconscious (recovery position).\n"
+             "5. Loosen tight clothing.\n"
+             "6. Do NOT give aspirin unless instructed by emergency services.",
+             "Time is CRITICAL — clot-busting treatment must be given within 4.5 hours of onset. "
+             "Do NOT leave the patient alone. Do NOT give food or water — swallowing reflex may be impaired.",
+             "THIS IS A MEDICAL EMERGENCY. Call 999 or 112 immediately. "
+             "The faster a stroke is treated, the less brain damage occurs."),
 
-            (D["stroke"], "Stroke First Aid — FAST Protocol",
-             "1. FAST CHECK:\n"
-             "   F — Face: Ask to smile. Is one side drooping?\n"
-             "   A — Arms: Ask to raise both arms. Is one weak?\n"
-             "   S — Speech: Ask to repeat a phrase. Is speech slurred?\n"
-             "   T — TIME: If yes to any → CALL FOR HELP IMMEDIATELY.\n\n"
-             "2. NOTHING BY MOUTH: Do not give food or drink.\n\n"
-             "3. POSITION: Sit up if breathing well. Recovery position if unconscious.\n\n"
-             "4. CALM: Keep person calm and still.",
-             "TIME IS BRAIN. Every minute of stroke = 1.9 million brain cells dying.",
-             "GO TO HOSPITAL IMMEDIATELY — treatment must begin within 4.5 hours."),
+            ("diabetes_type2", "Diabetic Emergency (Low Blood Sugar) First Aid",
+             "1. If conscious and able to swallow: give 3–4 glucose tablets, OR 150ml fruit juice, OR "
+             "3 teaspoons of sugar dissolved in water.\n"
+             "2. Wait 15 minutes and reassess.\n"
+             "3. If improved, give a starchy snack: banana, bread, or ugali.\n"
+             "4. If not improved after 15 minutes, give another sugary drink and seek emergency care.\n"
+             "5. If unconscious: DO NOT give anything by mouth — call emergency services immediately.\n"
+             "6. Place unconscious patient in recovery position.",
+             "Do NOT give sugar to a diabetic patient with HIGH blood sugar — this requires hospital treatment. "
+             "If unsure, call emergency services.",
+             "Seek emergency care if: patient loses consciousness, seizures occur, or blood sugar is unresponsive "
+             "to treatment. High blood sugar (DKA) also requires emergency care: fruity breath, deep rapid breathing."),
 
-            (D["epilepsy"], "Epileptic Seizure First Aid",
-             "1. CLEAR AREA: Remove hard or sharp objects from around the person.\n\n"
-             "2. CUSHION HEAD: Place something soft under their head.\n\n"
-             "3. DO NOT RESTRAIN: Never hold a person down during a seizure.\n\n"
-             "4. TIME: Note exactly when the seizure started.\n\n"
-             "5. AFTER SEIZURE: Gently roll onto side (recovery position).\n\n"
-             "6. NOTHING IN MOUTH: Never put anything in mouth.",
-             "You cannot swallow your tongue during a seizure. Never put anything in the mouth.",
-             "Call for help if:\n• Seizure lasts more than 5 minutes\n• First ever seizure\n• Injury during seizure\n• Pregnant woman"),
+            ("hypertension", "Hypertension Crisis First Aid",
+             "1. Keep the patient calm — stress raises blood pressure further.\n"
+             "2. Seat the patient comfortably — do NOT lay flat.\n"
+             "3. If the patient takes blood pressure medication, give their prescribed dose if missed.\n"
+             "4. Loosen tight clothing.\n"
+             "5. Take blood pressure readings every 5–10 minutes if a monitor is available.\n"
+             "6. Seek medical care for any reading above 180/120 mmHg.",
+             "Do NOT give others' blood pressure medications. "
+             "Hypertension is a silent disease — regular monitoring is essential even without symptoms.",
+             "Seek emergency care IMMEDIATELY if: severe headache, chest pain, vision changes, "
+             "confusion, or signs of stroke (face drooping, arm weakness, speech difficulty)."),
 
-            (D["anaemia"], "Anaemia Self-Care",
-             "1. IRON FOODS: Red meat, liver, beans, lentils, dark leafy greens, fortified uji.\n\n"
-             "2. VITAMIN C: Take with iron-rich foods to improve absorption.\n\n"
-             "3. DEWORM: Treat intestinal worms which cause blood loss.\n\n"
-             "4. MALARIA PREVENTION: Sleep under an insecticide-treated net.\n\n"
-             "5. SUPPLEMENTS: Take iron supplements as prescribed.",
-             "Severe anaemia in pregnancy is a medical emergency.",
-             "Go to hospital if:\n• Pale gums and inner eyelids\n• Difficulty breathing at rest\n• Fainting\n• Pregnant woman"),
+            ("anaemia", "Anaemia First Aid & Management",
+             "1. Encourage iron-rich foods: dark leafy greens (spinach, sukuma wiki), beans, meat, fish.\n"
+             "2. Take iron supplements as prescribed — on an empty stomach if tolerated.\n"
+             "3. Pair iron-rich foods with Vitamin C (orange, tomato) to enhance absorption.\n"
+             "4. Treat the underlying cause (malaria, worms, heavy periods).\n"
+             "5. Deworm with albendazole (available at health facilities).\n"
+             "6. Seek medical care for a blood test to confirm anaemia and identify cause.",
+             "Do NOT take iron supplements without a diagnosis — excess iron is toxic. "
+             "Avoid drinking tea or milk with iron-rich meals — these reduce iron absorption.",
+             "Seek urgent care if: extreme fatigue, fainting, severe pallor, chest pain, or "
+             "shortness of breath at rest."),
 
-            (D["worms"], "Intestinal Worms Treatment",
-             "1. MEDICINE: Albendazole 400 mg single dose. Available at clinics.\n\n"
-             "2. SCHOOL DEWORMING: Children should receive deworming tablets twice yearly.\n\n"
-             "3. CLEAN WATER: Drink only boiled or treated water.\n\n"
-             "4. COOK FOOD WELL: Cook all meat thoroughly.\n\n"
-             "5. FOOTWEAR: Wear shoes outdoors to prevent hookworm entry through skin.\n\n"
-             "6. HANDWASHING: Wash hands with soap before eating and after toilet.",
-             "Chronic worm infection causes severe malnutrition in children.",
-             "Go to clinic if:\n• Child not growing\n• Persistent belly pain\n• Worms visible in stool\n• Signs of anaemia"),
+            ("uti", "UTI First Aid",
+             "1. Drink plenty of water — at least 2–3 litres per day to flush bacteria.\n"
+             "2. Urinate frequently — do NOT hold urine.\n"
+             "3. Paracetamol or ibuprofen for pain relief.\n"
+             "4. Apply a warm compress to the lower abdomen for pain.\n"
+             "5. Avoid caffeine, alcohol, and spicy foods which irritate the bladder.\n"
+             "6. Seek medical care for antibiotic prescription — essential for cure.",
+             "Antibiotics are required — UTIs do not clear on their own. "
+             "Untreated UTIs can progress to kidney infection (pyelonephritis).",
+             "Seek urgent care if: fever and back pain (kidney involvement), blood in urine, "
+             "symptoms in pregnancy, or symptoms persist after 3 days of antibiotics."),
 
-            (D["measles"], "Measles First Aid",
-             "1. ISOLATE: Keep patient away from others — spreads through the air.\n\n"
-             "2. VITAMIN A: Give vitamin A supplements — reduces severity and blindness risk.\n\n"
-             "3. FEVER: Paracetamol and cool sponging.\n\n"
-             "4. FLUIDS: Plenty of fluids and soft food.\n\n"
-             "5. EYE CARE: Wipe eyes gently with clean wet cloth.\n\n"
-             "6. VACCINATE: Unvaccinated family members should receive measles vaccine immediately.",
-             "Measles causes death through pneumonia and brain inflammation.",
-             "Go to hospital if:\n• Breathing difficulty\n• Confusion or seizures\n• Cannot drink\n• Pus in the eye"),
+            ("wound_infection", "Wound Infection First Aid",
+             "1. Wash hands thoroughly before touching the wound.\n"
+             "2. Clean the wound with clean running water and gentle soap.\n"
+             "3. Apply an antiseptic (iodine or chlorhexidine) to the wound.\n"
+             "4. Cover with a clean, sterile dressing.\n"
+             "5. Change dressings daily and keep the wound dry.\n"
+             "6. Elevate the affected limb if swollen.\n"
+             "7. Seek medical care if signs of infection develop.",
+             "Do NOT use dirty cloths to cover wounds. "
+             "Do NOT remove embedded objects — this can cause severe bleeding.",
+             "Seek medical care IMMEDIATELY if: red streaks spreading from wound (septicaemia), "
+             "fever, pus discharge, wound won't stop bleeding, or patient has not had tetanus vaccine recently."),
 
-            (D["hiv"], "HIV — Getting Help",
-             "1. TEST: Get tested at a VCT centre. Free and confidential.\n\n"
-             "2. START ART: If positive, start antiretroviral therapy (ART) immediately. ART is free.\n\n"
-             "3. ADHERE: Never miss ART doses — resistance develops if you stop.\n\n"
-             "4. CONDOMS: Use consistently to protect partners.\n\n"
-             "5. NUTRITION: Eat a balanced diet to support immune function.\n\n"
-             "6. PrEP: If negative but high-risk, ask about pre-exposure prophylaxis.",
-             "HIV is manageable. People on ART in Kenya live full, long lives.",
-             "Go to clinic immediately if:\n• Signs of TB or oral thrush\n• Severe weight loss\n• Persistent high fever\n• Confusion"),
+            ("snake_bite", "Snake Bite Emergency First Aid",
+             "1. CALL 999 OR 112 IMMEDIATELY.\n"
+             "2. Keep the patient still and calm — movement spreads venom faster.\n"
+             "3. Immobilise the bitten limb below the level of the heart.\n"
+             "4. Remove rings, watches, or tight clothing near the bite.\n"
+             "5. Mark the edge of any swelling with a pen and note the time.\n"
+             "6. Transport to hospital as quickly as possible.",
+             "Do NOT cut the bite, suck out venom, apply tourniquet, or use ice. "
+             "Do NOT give alcohol. These actions cause MORE harm. "
+             "Try to remember the snake's appearance for antivenin selection.",
+             "This is a MEDICAL EMERGENCY. Antivenin must be given in hospital. "
+             "Time from bite to treatment is critical."),
 
-            (D["eclampsia"], "Eclampsia / Pre-eclampsia — EMERGENCY",
-             "1. HOSPITAL IMMEDIATELY: This is a maternal emergency. Call for help and go now.\n\n"
-             "2. ROLL: If the woman is fitting, gently roll her onto her left side.\n\n"
-             "3. DO NOT RESTRAIN: Clear the area around her. Do not hold her down.\n\n"
-             "4. AIRWAY: After fitting stops, ensure airway is clear.\n\n"
-             "5. CALM: Speak softly and reassure.",
-             "ECLAMPSIA IS A LEADING CAUSE OF MATERNAL DEATH IN KENYA. Do not delay.",
-             "GO TO HOSPITAL IMMEDIATELY if:\n• Pregnant woman has seizures\n• Severe headache in pregnancy\n• Very swollen face and hands"),
+            ("burns", "Burns First Aid",
+             "1. STOP the burning: remove from heat source. Remove clothing and jewellery unless stuck to skin.\n"
+             "2. COOL the burn: run cool (NOT cold or iced) water over the burn for 20 minutes.\n"
+             "3. COVER with a clean, non-fluffy material (cling wrap or a clean plastic bag is ideal).\n"
+             "4. Do NOT apply toothpaste, butter, or oil — these cause infection and retain heat.\n"
+             "5. Give paracetamol for pain.\n"
+             "6. Raise the affected area if possible.",
+             "NEVER use ice, iced water, butter, toothpaste, or raw egg on burns. "
+             "Do not burst blisters — this increases infection risk.",
+             "Seek emergency care for: burns on face, hands, feet, genitals, or joints; "
+             "burns larger than the patient's palm; deep white/black burns; chemical or electrical burns; "
+             "burns in children under 5 or adults over 60."),
 
-            (D["postpartum_haemorrhage"], "Postpartum Haemorrhage — EMERGENCY",
-             "1. CALL FOR HELP: Shout for help and arrange urgent transport to hospital.\n\n"
-             "2. MASSAGE UTERUS: Rub the uterus (through the belly) firmly in circles.\n\n"
-             "3. BREASTFEED: Put baby to breast — releases oxytocin to help uterus contract.\n\n"
-             "4. LAY FLAT: Lay woman flat and raise legs to maintain blood to vital organs.\n\n"
-             "5. KEEP WARM: Cover with blanket to prevent shock.",
-             "A woman can die from PPH in less than 2 hours without medical treatment.",
-             "THIS IS A LIFE-THREATENING EMERGENCY — GO TO HOSPITAL NOW."),
+            ("conjunctivitis", "Conjunctivitis (Pink Eye) First Aid",
+             "1. Wash hands before and after touching the eyes.\n"
+             "2. Clean eye discharge with a clean, warm, damp cloth — wipe from inner to outer corner.\n"
+             "3. Use a separate cloth for each eye.\n"
+             "4. Do NOT share towels, pillows, or eye drops.\n"
+             "5. Remove contact lenses until infection clears.\n"
+             "6. Seek medical care for antibiotic drops (bacterial) or antiviral treatment (viral).",
+             "Conjunctivitis is highly contagious. Wash hands frequently. "
+             "Do not touch or rub eyes.",
+             "Seek medical care if: severe eye pain, vision loss, sensitivity to light, "
+             "intense redness, or symptoms not improving after 3 days."),
 
-            (D["schistosomiasis"], "Bilharzia (Schistosomiasis) Care",
-             "1. CLINIC: Praziquantel is a safe, effective single-dose treatment.\n\n"
-             "2. AVOID LAKE WATER: Do not swim in slow-moving freshwater in endemic areas.\n\n"
-             "3. CLEAN WATER: Use piped or boiled water for bathing where possible.\n\n"
-             "4. SCHOOL PROGRAMMES: Children in endemic areas should receive annual treatment.",
-             "Chronic untreated bilharzia permanently damages the bladder and liver.",
-             "Go to clinic if:\n• Blood in urine\n• Abdominal pain\n• Liver swelling\n• Frequent urination"),
+            ("malaria_pregnancy", "Malaria in Pregnancy — Emergency First Aid",
+             "1. Seek medical care IMMEDIATELY — malaria in pregnancy is an emergency.\n"
+             "2. Give paracetamol to reduce fever while arranging transport.\n"
+             "3. Ensure adequate hydration.\n"
+             "4. Sleep under an insecticide-treated bed net every night.\n"
+             "5. Take Intermittent Preventive Treatment (IPTp) as advised at antenatal clinic.",
+             "Do NOT self-medicate with antimalarials during pregnancy without medical supervision. "
+             "Some antimalarials are dangerous to the unborn baby.",
+             "GO TO HOSPITAL IMMEDIATELY. Malaria in pregnancy can cause miscarriage, premature birth, "
+             "severe anaemia, and maternal death."),
 
-            (D["malnutrition"], "Malnutrition First Aid",
-             "1. THERAPEUTIC FEEDING: Severe malnutrition requires specialised food (Plumpy'Nut, F-75, F-100).\n\n"
-             "2. DO NOT FORCE FEED: Give small amounts frequently.\n\n"
-             "3. TREAT INFECTIONS: Malnutrition is complicated by infections — get full assessment.\n\n"
-             "4. ORS: Treat dehydration before feeding.\n\n"
-             "5. MICRONUTRIENTS: Vitamin A, zinc, and iron as prescribed.",
-             "Severely malnourished children must be treated at a health facility.",
-             "Go to hospital immediately for:\n• Severe wasting (visible ribs)\n• Swollen ankles with pale skin\n• Unconscious child\n• Unable to eat or drink"),
+            ("pre_eclampsia", "Pre-eclampsia Emergency First Aid",
+             "1. CALL 999 OR 112 IMMEDIATELY — pre-eclampsia is a medical emergency.\n"
+             "2. Keep the patient calm and at rest in a quiet, darkened room.\n"
+             "3. Lay on the LEFT side if possible.\n"
+             "4. Do NOT give any medications without medical instruction.\n"
+             "5. Monitor for seizures (eclampsia) — see below.",
+             "Pre-eclampsia can progress to eclampsia (seizures) and maternal/fetal death without hospital treatment.",
+             "GO TO HOSPITAL IMMEDIATELY. Pre-eclampsia only resolves after delivery — "
+             "only hospital management can prevent serious harm."),
+
+            ("chickenpox", "Chickenpox First Aid",
+             "1. Keep nails short and clean — discourage scratching to prevent scarring and infection.\n"
+             "2. Apply calamine lotion or antihistamine cream to relieve itching.\n"
+             "3. Give paracetamol for fever — NOT aspirin or ibuprofen.\n"
+             "4. Cool baths with baking soda help relieve itching.\n"
+             "5. Wear loose, cotton clothing.\n"
+             "6. Keep child home from school until all blisters have crusted over.",
+             "Do NOT give aspirin — risk of Reye's syndrome. "
+             "Chickenpox is highly contagious from 2 days before the rash until all blisters crust.",
+             "Seek medical care if: rash near eyes, rash in immunocompromised patient, "
+             "severe headache or stiff neck, high fever, difficulty breathing, or infected blisters."),
+
+            ("acute_diarrhea", "Acute Gastroenteritis / Diarrhea First Aid",
+             "1. Start Oral Rehydration Solution (ORS) IMMEDIATELY.\n"
+             "2. Adults: drink 200–400 ml ORS after each loose stool.\n"
+             "3. Children: give 50–100 ml ORS per kg body weight over 4 hours.\n"
+             "4. Continue breastfeeding infants.\n"
+             "5. Give zinc supplements to children 6 months–5 years for 10–14 days.\n"
+             "6. Wash hands with soap after using toilet and before eating.",
+             "Do NOT give anti-diarrhoeal drugs to children — they can be dangerous. "
+             "If homemade ORS: 1 level teaspoon salt + 8 level teaspoons sugar per 1 litre clean water.",
+             "Seek medical care if: blood or mucus in stool, no urine in 6+ hours (child) or 8+ hours (adult), "
+             "sunken eyes, dry mouth, persistent vomiting, or fever above 38.5°C."),
+
+            ("hiv", "HIV First Aid & Support",
+             "1. If potential recent exposure (within 72 hours): seek PEP (Post-Exposure Prophylaxis) "
+             "at any government hospital IMMEDIATELY.\n"
+             "2. Get tested — HIV testing is FREE and confidential at all public facilities.\n"
+             "3. If positive: start ART (antiretroviral therapy) — it is FREE in Kenya and saves lives.\n"
+             "4. Practice safe sex to protect partners.\n"
+             "5. Eat nutritious meals to support the immune system.\n"
+             "6. Attend all clinic appointments and take medication daily.",
+             "There is NO cure for HIV, but ART controls the virus completely. "
+             "People on ART live full, long lives and cannot transmit the virus to partners.",
+             "Seek medical care for any opportunistic infections: persistent fever, weight loss, "
+             "chronic cough, thrush, or skin lesions."),
+
+            ("epilepsy", "Seizure / Epilepsy First Aid",
+             "1. Stay calm — most seizures stop on their own within 1–3 minutes.\n"
+             "2. Ease the person to the ground — protect the head with a folded cloth.\n"
+             "3. Clear the area of hard or sharp objects.\n"
+             "4. Lay the person on their side (recovery position) to keep airway clear.\n"
+             "5. Time the seizure — note start and end time.\n"
+             "6. Do NOT restrain the person or put anything in their mouth.",
+             "NEVER put your fingers or any object in a seizing person's mouth — you WILL be bitten. "
+             "They will NOT swallow their tongue.",
+             "Call emergency services if: seizure lasts more than 5 minutes, "
+             "another seizure starts immediately, breathing does not return to normal after the seizure, "
+             "or the person was injured, in water, or pregnant."),
+
+            ("kidney_stones", "Kidney Stone First Aid",
+             "1. Drink plenty of water — 2–3 litres per day to help pass the stone.\n"
+             "2. Take paracetamol or ibuprofen for pain relief.\n"
+             "3. Apply a warm compress to the back or side for comfort.\n"
+             "4. Strain urine through a cloth to catch the stone for analysis.\n"
+             "5. Seek medical evaluation for imaging and specialist care.",
+             "Avoid pain relief stronger than prescribed. "
+             "Fever + back pain = possible kidney infection — seek urgent care.",
+             "Seek urgent care if: fever with pain, inability to urinate, severe vomiting, "
+             "pain not controlled by medications, or blood in urine."),
+
+            ("measles", "Measles First Aid",
+             "1. Isolate the patient — measles is extremely contagious for 4 days before and after rash.\n"
+             "2. Rest in a well-lit room is fine — light sensitivity is a myth.\n"
+             "3. Give paracetamol for fever.\n"
+             "4. Ensure plenty of fluids.\n"
+             "5. Give Vitamin A supplements — dramatically reduces measles complications.\n"
+             "6. Seek medical care immediately.",
+             "Measles is vaccine-preventable. Report cases to local health authorities. "
+             "Do NOT give aspirin to children.",
+             "Seek emergency care if: breathing difficulty, severe rash with fever, "
+             "convulsions, confusion, or vision problems."),
         ]
 
-        for disease, title, steps, warning, when_help in FA:
-            FirstAidProcedure.objects.create(
-                disease=disease,
-                title=title,
-                steps=steps,
-                warning_notes=warning,
-                when_to_seek_help=when_help,
-            )
+        for key, title, steps, warning, when_help in FA_DATA:
+            if key in D:
+                FirstAidProcedure.objects.create(
+                    disease=D[key],
+                    title=title,
+                    steps=steps,
+                    warning_notes=warning,
+                    when_to_seek_help=when_help,
+                )
 
         # ── EMERGENCY KEYWORDS ────────────────────────────────────────────────
-        EK = [
-            ("unconscious", "CRITICAL",
-             "🚨 EMERGENCY — Person is UNCONSCIOUS.\n\nCall 999 or 112 immediately.\n\n"
-             "WHILE WAITING:\n• Check if breathing — look for chest rise\n"
-             "• If breathing: place on side (recovery position)\n"
-             "• If NOT breathing: start CPR\n"
-             "  — Push HARD and FAST on centre of chest 30 times\n"
-             "  — Give 2 rescue breaths if trained\n"
-             "  — Repeat until help arrives\n"
-             "• Loosen any tight clothing"),
-
-            ("not breathing", "CRITICAL",
-             "🚨 EMERGENCY — Person is NOT BREATHING.\n\nCall 999/112 NOW and start CPR:\n"
-             "• Lay on back on hard surface\n"
-             "• Heel of hand on centre of chest\n"
-             "• Push hard and fast — at least 100 times per minute\n"
-             "• Give 2 rescue breaths every 30 compressions\n"
-             "• Do not stop until emergency services arrive"),
-
-            ("severe bleeding", "CRITICAL",
-             "🚨 SEVERE BLEEDING.\n\nCall 999/112 immediately.\n\n"
-             "STOP THE BLEEDING:\n• Press FIRMLY on wound with clean cloth\n"
-             "• Do NOT remove cloth even if soaked — add more on top\n"
-             "• Raise injured limb above heart level if possible\n"
-             "• Keep person lying down and warm"),
-
-            ("snake bite", "CRITICAL",
-             "🚨 SNAKE BITE — Medical Emergency.\n\nCall 999/112 immediately.\n\n"
-             "DO:\n• Keep person calm and completely STILL\n"
-             "• Remove watches, rings, tight clothing near bite\n"
-             "• Note snake colour and markings if safe\n"
-             "• Get to hospital as fast as possible\n\n"
-             "DO NOT:\n• Cut the wound\n• Suck out venom\n• Apply tourniquet\n• Give alcohol"),
-
-            ("heart attack", "CRITICAL",
-             "🚨 POSSIBLE HEART ATTACK.\n\nCall 999/112 immediately.\n\n"
-             "WHILE WAITING:\n• Sit person comfortably — do NOT lay flat\n"
-             "• Loosen tight clothing\n"
-             "• If aspirin available and no allergy — give 300 mg to CHEW\n"
-             "• Reassure and keep calm\n• Be ready to start CPR if needed"),
-
-            ("choking", "CRITICAL",
-             "🚨 CHOKING — Cannot Breathe.\n\nIF CONSCIOUS:\n"
-             "• Give 5 firm back blows between shoulder blades\n"
-             "• Then 5 abdominal thrusts (Heimlich manoeuvre)\n"
-             "• Alternate until object is out\n\nIF UNCONSCIOUS:\n"
-             "• Call 999/112\n• Start CPR"),
-
-            ("drowning", "CRITICAL",
-             "🚨 DROWNING.\n\nCall 999/112.\n\n"
-             "• Get person out of water SAFELY (do not risk yourself)\n"
-             "• Check breathing\n"
-             "• If not breathing: start CPR immediately\n"
-             "• Keep warm after rescue — cold water causes hypothermia"),
-
-            ("poison", "CRITICAL",
-             "🚨 POISONING.\n\nCall 999/112 or Nairobi Poison Centre: 0800 720 021\n\n"
-             "• Find the container or substance if possible\n"
-             "• Take it to hospital with you\n"
-             "• If on skin — rinse with water for 15 minutes\n"
-             "• If in eye — rinse with clean water for 15 minutes\n"
-             "• If fumes — move to fresh air immediately\n"
-             "• DO NOT induce vomiting unless specifically advised"),
-
-            ("eclampsia", "CRITICAL",
-             "🚨 ECLAMPSIA — Pregnant Woman Having Seizures.\n\n"
-             "Maternal emergency — call 999/112 immediately.\n\n"
-             "• Roll woman onto LEFT side\n"
-             "• Clear area — DO NOT restrain\n"
-             "• After seizure: check airway is clear\n"
-             "• Get to maternity hospital NOW"),
-
-            ("cerebral malaria", "CRITICAL",
-             "🚨 CEREBRAL MALARIA — Seizures or Unconsciousness with Fever.\n\n"
-             "GO TO HOSPITAL IMMEDIATELY.\n\n"
-             "• Roll on side to prevent choking\n"
-             "• Do NOT restrain during seizure\n"
-             "• Nothing by mouth\n"
-             "• This can kill in hours without IV treatment"),
-
-            ("postpartum bleeding", "CRITICAL",
-             "🚨 POSTPARTUM HAEMORRHAGE — Heavy Bleeding After Delivery.\n\n"
-             "Life-threatening — act immediately.\n\n"
-             "• Call for help\n"
-             "• Rub uterus (belly) firmly in circles\n"
-             "• Put baby to breast to stimulate contractions\n"
-             "• Lay woman flat, raise legs\n"
-             "• GO TO HOSPITAL NOW"),
-
-            ("stroke", "CRITICAL",
-             "🚨 POSSIBLE STROKE.\n\nFAST CHECK:\n"
-             "F — Face drooping?\n"
-             "A — Arm weakness?\n"
-             "S — Speech slurred?\n"
-             "T — TIME to call 999/112 NOW.\n\nEvery minute matters — go to hospital immediately."),
-
-            ("seizure", "URGENT",
-             "⚠️ SEIZURE.\n\nDO:\n• Move hard objects away\n• Cushion head with something soft\n"
-             "• Time the seizure\n• Roll onto side after jerking stops\n• Stay with the person\n\n"
-             "DO NOT:\n• Restrain the person\n• Put anything in the mouth\n\n"
-             "Call 999/112 if: seizure lasts > 5 minutes, no recovery, first ever seizure, or injury occurs"),
-
-            ("burn", "URGENT",
-             "⚠️ BURN.\n\n"
-             "• Cool burn with COOL (not cold/ice) running water for 20 minutes\n"
-             "• Remove jewellery and watches before swelling starts\n"
-             "• DO NOT apply toothpaste, butter, egg, or oil\n"
-             "• Cover loosely with clean cling wrap or cloth\n\n"
-             "Go to hospital if burn is on face, hands, feet, genitals, or larger than palm of hand"),
-
-            ("fainting", "URGENT",
-             "⚠️ FAINTING.\n\n"
-             "• Lay person flat and raise legs above heart level\n"
-             "• Loosen tight clothing\n"
-             "• Ensure fresh air\n"
-             "• Do NOT let them sit or stand up too quickly\n\n"
-             "Call for help if not fully recovered within 1 minute"),
-
-            ("convulsions", "URGENT",
-             "⚠️ CONVULSIONS.\n\n"
-             "• Clear area around person\n• Cushion head\n• DO NOT hold down\n"
-             "• Roll onto side after jerking stops\n• Time the duration\n\n"
-             "Call 999/112 if lasting more than 5 minutes"),
-
-            ("bleeding", "URGENT",
-             "⚠️ BLEEDING.\n\n"
-             "• Apply firm pressure with clean cloth\n"
-             "• Raise injured area if possible\n"
-             "• Do not remove cloth — add more if it soaks through\n\n"
-             "Call 999/112 if bleeding is severe, pulsing, or will not stop"),
-
-            ("chest pain", "URGENT",
-             "⚠️ CHEST PAIN.\n\n"
-             "Possible heart attack — especially with sweating, arm pain, or jaw pain.\n\n"
-             "• Have person sit comfortably and rest\n"
-             "• Loosen clothing\n"
-             "• If aspirin available and no allergy — give 300 mg to chew\n\n"
-             "Call 999/112 if pain is severe, spreading, or person feels unwell"),
-
-            # Common misspellings / variant phrases
-            ("unconcious", "CRITICAL",
-             "🚨 Unconscious person. Call 999/112 NOW.\n"
-             "Check breathing. If breathing, recovery position. If not — start CPR."),
-
-            ("not waking", "CRITICAL",
-             "🚨 Person cannot be woken. Call 999/112 immediately.\n"
-             "Check breathing and start CPR if needed."),
-
-            ("pregnancy emergency", "CRITICAL",
-             "🚨 PREGNANCY EMERGENCY.\n\nCall 999/112 immediately.\n\n"
-             "• Keep woman calm and lying on her LEFT side\n"
-             "• Note any bleeding, seizures, or loss of consciousness\n"
-             "• Do not give food or drink\n"
-             "• Get to the nearest maternity hospital NOW"),
+        EMERGENCY_DATA = [
+            # CRITICAL
+            ("not breathing", "CRITICAL", "🚨 EMERGENCY: Call 999 or 112 immediately. Start CPR if trained. Do not leave the patient alone."),
+            ("stopped breathing", "CRITICAL", "🚨 EMERGENCY: Call 999 or 112 immediately. Start CPR if trained."),
+            ("unconscious", "CRITICAL", "🚨 EMERGENCY: Call 999 or 112 now. Place in recovery position. Do not give food or water."),
+            ("cannot breathe", "CRITICAL", "🚨 EMERGENCY: Call 999 or 112 immediately. Keep patient upright and calm."),
+            ("heart attack", "CRITICAL", "🚨 EMERGENCY: Call 999 or 112 immediately. Give 300mg aspirin to chew if not allergic. Keep patient still and calm."),
+            ("stroke", "CRITICAL", "🚨 EMERGENCY: Call 999 or 112 immediately. Note time symptoms started — clot-busting treatment must be given within 4.5 hours."),
+            ("poisoned", "CRITICAL", "🚨 EMERGENCY: Call 999 or 112. Do NOT induce vomiting unless instructed. Note the substance taken."),
+            ("snake bite", "CRITICAL", "🚨 EMERGENCY: Call 999 or 112. Keep patient still, immobilise bitten limb. Go to hospital immediately for antivenin."),
+            ("drowning", "CRITICAL", "🚨 EMERGENCY: Call 999 or 112. Start CPR if trained. Do not put unconscious person on their back without clearing airway."),
+            ("severe bleeding", "CRITICAL", "🚨 EMERGENCY: Apply firm direct pressure to the wound. Call 999 or 112. Do not remove dressings — add more if soaked."),
+            ("collapsed", "CRITICAL", "🚨 EMERGENCY: Call 999 or 112. Check breathing. Start CPR if no pulse and no breathing."),
+            ("anaphylaxis", "CRITICAL", "🚨 EMERGENCY: Use epinephrine/EpiPen if available. Call 999 or 112 immediately. Lay flat with legs raised unless breathing is difficult."),
+            ("allergic reaction severe", "CRITICAL", "🚨 EMERGENCY: Call 999 or 112 immediately if throat swelling, difficulty breathing, or loss of consciousness."),
+            ("degedege", "CRITICAL", "🚨 EMERGENCY (Seizure/Convulsions): Call 999 or 112. Do not restrain. Clear area. Do not put anything in mouth."),
+            ("convulsions", "CRITICAL", "🚨 EMERGENCY: Protect from injury. Time the seizure. Call 999 or 112 if it lasts more than 5 minutes."),
+            ("eclampsia", "CRITICAL", "🚨 EMERGENCY: Call 999 or 112 immediately — pregnant patient having seizures needs urgent hospital care."),
+            ("coughing blood", "CRITICAL", "🚨 EMERGENCY: Call 999 or 112. Sit upright. Could indicate TB, lung injury, or severe pneumonia."),
+            # URGENT
+            ("chest pain", "URGENT", "⚠️ URGENT: Chest pain may indicate a heart attack. Seek emergency care immediately. Call 999 or 112 if severe."),
+            ("difficulty breathing", "URGENT", "⚠️ URGENT: Seek medical care immediately. Sit upright. If asthmatic, use your inhaler. Call 999 or 112 if severe."),
+            ("seizure", "URGENT", "⚠️ URGENT: Seek medical care after the seizure stops. Call 999 or 112 if it lasts over 5 minutes."),
+            ("high fever", "URGENT", "⚠️ URGENT: Fever above 39°C in adults or 38°C in children under 5 requires prompt medical evaluation. Give paracetamol and go to hospital."),
+            ("meningitis", "URGENT", "⚠️ URGENT: Stiff neck + fever + headache = possible meningitis. Seek emergency care immediately."),
+            ("baby not breathing", "URGENT", "🚨 EMERGENCY: Call 999 or 112 immediately. Start infant CPR if trained."),
+            ("child not waking up", "URGENT", "🚨 EMERGENCY: Call 999 or 112 immediately."),
+            ("very dehydrated", "URGENT", "⚠️ URGENT: Start ORS immediately and transport to hospital. IV fluids may be needed."),
+            ("blood in stool", "URGENT", "⚠️ URGENT: Blood in stool requires medical evaluation today — could indicate dysentery, typhoid, or bowel problem."),
+            ("blood in urine", "URGENT", "⚠️ URGENT: Seek medical care promptly — could be UTI, kidney stones, schistosomiasis, or cancer."),
+            # CAUTION
+            ("fever", "CAUTION", "⚠️ CAUTION: Give paracetamol, encourage fluids, and rest. Seek medical care if fever is above 39°C or lasts more than 3 days."),
+            ("malaria symptoms", "CAUTION", "⚠️ CAUTION: Get tested for malaria at the nearest health facility. Do not self-treat without a confirmed diagnosis."),
+            ("diarrhea", "CAUTION", "⚠️ CAUTION: Start ORS immediately. Seek medical care if diarrhea lasts more than 2 days, contains blood, or patient is very young or elderly."),
+            ("vomiting", "CAUTION", "⚠️ CAUTION: Rest the stomach, sip ORS or water. Seek care if vomiting is persistent, contains blood, or is accompanied by severe abdominal pain."),
         ]
 
-        for keyword, severity, response in EK:
-            EmergencyKeyword.objects.get_or_create(
+        for keyword, severity, message in EMERGENCY_DATA:
+            EmergencyKeyword.objects.create(
                 keyword=keyword,
-                defaults={"severity": severity, "response_message": response},
+                severity=severity,
+                response_message=message,
             )
