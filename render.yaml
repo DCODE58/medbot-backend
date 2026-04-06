@@ -9,9 +9,9 @@ services:
       pip install --upgrade pip setuptools wheel &&
       pip install --prefer-binary -r requirements.txt &&
       python -m nltk.downloader -q -d /tmp/nltk_data punkt punkt_tab stopwords wordnet &&
+      mkdir -p staticfiles &&
       python manage.py collectstatic --noinput &&
       python manage.py migrate --noinput &&
-      python manage.py createcachetable &&
       python manage.py populate_kenya_data --force
 
     startCommand: >
@@ -45,6 +45,9 @@ services:
 
       - key: NLTK_DATA
         value: "/tmp/nltk_data"
+
+      - key: PYTHON_VERSION
+        value: "3.11.9"
 
 databases:
   - name: medbot-db
