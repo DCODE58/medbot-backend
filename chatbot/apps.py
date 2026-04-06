@@ -4,7 +4,6 @@ import threading
 import time
 
 from django.apps import AppConfig
-from django.db.utils import OperationalError, ProgrammingError
 
 logger = logging.getLogger(__name__)
 
@@ -19,55 +18,73 @@ class ChatbotConfig(AppConfig):
     name = "chatbot"
 
     def ready(self) -> None:
-        # Skip warm-up during management commands
+        # Skip warm-up for management commands
         if any(cmd in sys.argv for cmd in _SKIP_COMMANDS):
             return
 
-        # Run warm-up in background to avoid blocking startup
+        # IMPORTANT: avoid multiple threads in dev reloaders
+        if sys.argv and "runserver" in sys.argv[0]:
+            return
+
         threading.Thread(target=self._delayed_warmup, daemon=True).start()
 
-    # ── Delayed Warm-Up ───────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────
+    # SAFE DELAYED WARMUP
+    # ─────────────────────────────────────────────
 
     def _delayed_warmup(self):
         """
-        Delay warm-up slightly to allow:
-        - DB connection to stabilize
-        - migrations to complete
-        - app to fully boot
+        Wait for DB + migrations to stabilize,
+        then safely warm up services.
         """
+
         time.sleep(5)
 
-        self._warm_rag()
-        self._warm_nlp()
+        # retry loop instead of blind execution
+        self._retry_warmup(self._warm_rag, "RAG")
+        self._retry_warmup(self._warm_nlp, "NLP")
 
-    # ── Warm-Up: RAG ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────
+    # RETRY WRAPPER (KEY FIX)
+    # ─────────────────────────────────────────────
 
-    def _warm_rag(self) -> None:
-        try:
-            from .rag_retriever import get_rag_retriever
-            get_rag_retriever().warm_up()
-            logger.info("RAG warm-up triggered")
+    def _retry_warmup(self, func, name, retries=5, delay=3):
+        for attempt in range(retries):
+            try:
+                func()
+                logger.info("%s warm-up completed", name)
+                return
 
-        except (OperationalError, ProgrammingError) as exc:
-            logger.warning("RAG warm-up skipped (DB not ready): %s", exc)
+            except Exception as exc:
+                logger.warning(
+                    "%s warm-up attempt %d failed: %s",
+                    name,
+                    attempt + 1,
+                    str(exc)
+                )
+                time.sleep(delay)
 
-        except Exception as exc:
-            logger.exception("Unexpected RAG warm-up failure: %s", exc)
+        logger.error("%s warm-up FAILED after retries", name)
 
-    # ── Warm-Up: NLP ──────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────
+    # RAG WARM-UP
+    # ─────────────────────────────────────────────
 
-    def _warm_nlp(self) -> None:
-        try:
-            from .nlp_processor import MedicalNLPProcessor
+    def _warm_rag(self):
+        from .rag_retriever import get_rag_retriever
+        get_rag_retriever().warm_up()
 
-            processor = MedicalNLPProcessor()
-            processor._get_all_symptoms()
-            processor._get_emergency_keywords()
+        logger.info("RAG warm-up triggered")
 
-            logger.info("NLP caches pre-warmed")
+    # ─────────────────────────────────────────────
+    # NLP WARM-UP
+    # ─────────────────────────────────────────────
 
-        except (OperationalError, ProgrammingError) as exc:
-            logger.warning("NLP warm-up skipped (DB not ready): %s", exc)
+    def _warm_nlp(self):
+        from .nlp_processor import MedicalNLPProcessor
 
-        except Exception as exc:
-            logger.exception("Unexpected NLP warm-up failure: %s", exc)
+        processor = MedicalNLPProcessor()
+        processor._get_all_symptoms()
+        processor._get_emergency_keywords()
+
+        logger.info("NLP caches pre-warmed")
