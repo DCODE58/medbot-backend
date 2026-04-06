@@ -10,6 +10,7 @@ Fixes applied:
   3. STATICFILES_STORAGE replaced with the STORAGES dict (Django 4.2+).
      The old string form still works but emits a deprecation warning.
   4. ALLOWED_HOSTS split strips whitespace around each entry.
+  5. ssl_require removed — psycopg3 reads sslmode from DATABASE_URL directly.
 """
 
 import os
@@ -29,7 +30,6 @@ if not SECRET_KEY:
 
 DEBUG = os.getenv("DEBUG", "False") == "True"
 
-# Fix 4: strip() on every entry so trailing spaces in env vars don't break host matching
 ALLOWED_HOSTS = [
     h.strip()
     for h in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
@@ -52,7 +52,6 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
-    # CorsMiddleware must come before CommonMiddleware
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -83,14 +82,13 @@ TEMPLATES = [
 WSGI_APPLICATION = "medical_chatbot.wsgi.application"
 
 # ── Database ──────────────────────────────────────────────────────────────────
-# Render injects DATABASE_URL when a Postgres service is attached.
 _database_url = os.getenv("DATABASE_URL")
 if _database_url:
     DATABASES = {
         "default": dj_database_url.config(
             default=_database_url,
             conn_max_age=600,
-            ssl_require=not DEBUG,
+            # ssl_require removed — psycopg3 reads sslmode from DATABASE_URL directly
         )
     }
 else:
@@ -106,8 +104,6 @@ else:
     }
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
-# DatabaseCache — no Redis needed on Render free tier.
-# Table is created by: python manage.py createcachetable  (in render.yaml)
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.db.DatabaseCache",
@@ -127,12 +123,10 @@ _cors_raw = os.getenv(
 )
 CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_raw.split(",") if o.strip()]
 
-# Covers all Vercel preview deployment URLs automatically
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https://.*\.vercel\.app$",
 ]
 
-# session_id is passed in the request body — no cookies needed
 CORS_ALLOW_CREDENTIALS = False
 
 CORS_ALLOW_METHODS = [
@@ -160,11 +154,9 @@ CORS_ALLOW_HEADERS = [
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
-# Fix 2: guard so collectstatic never fails on a fresh repo without a static/ dir
 _custom_static = BASE_DIR / "static"
 STATICFILES_DIRS = [_custom_static] if _custom_static.is_dir() else []
 
-# Fix 3: use STORAGES dict (Django 4.2+) — old STATICFILES_STORAGE string is deprecated
 STORAGES = {
     "default": {
         "BACKEND": "django.core.files.storage.FileSystemStorage",
@@ -190,13 +182,8 @@ USE_TZ = True
 
 # ── Security ─────────────────────────────────────────────────────────────────
 if not DEBUG:
-    # Fix 1: Render terminates TLS at its proxy — we must NOT redirect again.
-    # Setting True here causes an infinite redirect loop (HTTP → HTTPS → HTTP → …).
     SECURE_SSL_REDIRECT = False
-
-    # Tell Django the original request was HTTPS (Render sets this header)
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
-
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     SECURE_HSTS_SECONDS = 31536000
@@ -237,4 +224,4 @@ LOGGING = {
             "propagate": False,
         },
     },
-  }
+}
