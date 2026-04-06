@@ -33,9 +33,6 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
-    # FIX: django.contrib.postgres MUST be in INSTALLED_APPS when using
-    # SearchVectorField, GinIndex, or any postgres-specific model fields.
-    # Without it, migrations can fail and the ORM layer may error on import.
     "django.contrib.postgres",
     "corsheaders",
     "chatbot",
@@ -75,36 +72,42 @@ TEMPLATES = [
 WSGI_APPLICATION = "medical_chatbot.wsgi.application"
 
 # -- Database ----------------------------------------------------------------
+# KEY FIX: CONN_HEALTH_CHECKS=True makes Django ping the connection before
+# reusing it from the pool.  On Render free-tier the PostgreSQL server silently
+# drops idle connections after ~5 minutes.  With CONN_MAX_AGE=600 the dead
+# socket stays in Django's pool; the next query that tries to use it gets
+# "server closed the connection unexpectedly" which escapes all the view-level
+# try/except blocks and shows as 500.  CONN_HEALTH_CHECKS silently reconnects.
 _database_url = os.getenv("DATABASE_URL")
 if _database_url:
     DATABASES = {
         "default": dj_database_url.config(
             default=_database_url,
-            conn_max_age=600,
+            conn_max_age=60,
+            conn_health_checks=True,
         )
     }
 else:
     DATABASES = {
         "default": {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": os.getenv("DB_NAME", "medical_chatbot"),
-            "USER": os.getenv("DB_USER", "postgres"),
-            "PASSWORD": os.getenv("DB_PASSWORD", ""),
-            "HOST": os.getenv("DB_HOST", "localhost"),
-            "PORT": os.getenv("DB_PORT", "5432"),
+            "ENGINE":             "django.db.backends.postgresql",
+            "NAME":               os.getenv("DB_NAME", "medical_chatbot"),
+            "USER":               os.getenv("DB_USER", "postgres"),
+            "PASSWORD":           os.getenv("DB_PASSWORD", ""),
+            "HOST":               os.getenv("DB_HOST", "localhost"),
+            "PORT":               os.getenv("DB_PORT", "5432"),
+            "CONN_MAX_AGE":       60,
+            "CONN_HEALTH_CHECKS": True,
         }
     }
 
 # -- Cache -------------------------------------------------------------------
-# LocMemCache: in-process, zero external dependencies, no migration needed.
 CACHES = {
     "default": {
-        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "BACKEND":  "django.core.cache.backends.locmem.LocMemCache",
         "LOCATION": "dawa-cache",
-        "TIMEOUT": 3600,
-        "OPTIONS": {
-            "MAX_ENTRIES": 2000,
-        },
+        "TIMEOUT":  3600,
+        "OPTIONS":  {"MAX_ENTRIES": 2000},
     }
 }
 
@@ -115,43 +118,28 @@ _cors_raw = os.getenv(
     "http://localhost:5500,http://127.0.0.1:5500",
 )
 CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_raw.split(",") if o.strip()]
-
-CORS_ALLOWED_ORIGIN_REGEXES = [
-    r"^https://.*\.vercel\.app$",
-]
-
+CORS_ALLOWED_ORIGIN_REGEXES = [r"^https://.*\.vercel\.app$"]
 CORS_ALLOW_CREDENTIALS = False
-
-CORS_ALLOW_METHODS = ["DELETE", "GET", "OPTIONS", "PATCH", "POST", "PUT"]
-
-CORS_ALLOW_HEADERS = [
-    "accept",
-    "accept-encoding",
-    "authorization",
-    "content-type",
-    "dnt",
-    "origin",
-    "user-agent",
-    "x-csrftoken",
-    "x-requested-with",
+CORS_ALLOW_METHODS     = ["DELETE", "GET", "OPTIONS", "PATCH", "POST", "PUT"]
+CORS_ALLOW_HEADERS     = [
+    "accept", "accept-encoding", "authorization", "content-type",
+    "dnt", "origin", "user-agent", "x-csrftoken", "x-requested-with",
 ]
 
 # -- Static files ------------------------------------------------------------
 STATIC_URL  = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
-# FIX: only add to STATICFILES_DIRS if the directory exists AND is not the
-# same as STATIC_ROOT (Django raises SuspiciousFileOperation otherwise).
 _custom_static = BASE_DIR / "static"
-STATICFILES_DIRS = [_custom_static] if _custom_static.is_dir() and _custom_static != STATIC_ROOT else []
+STATICFILES_DIRS = (
+    [_custom_static]
+    if _custom_static.is_dir() and _custom_static != STATIC_ROOT
+    else []
+)
 
 STORAGES = {
-    "default": {
-        "BACKEND": "django.core.files.storage.FileSystemStorage",
-    },
-    "staticfiles": {
-        "BACKEND": "whitenoise.storage.CompressedStaticFilesStorage",
-    },
+    "default":     {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "whitenoise.storage.CompressedStaticFilesStorage"},
 }
 
 # -- Auth password validators ------------------------------------------------
@@ -170,7 +158,7 @@ USE_TZ        = True
 
 # -- Security (production only) ----------------------------------------------
 if not DEBUG:
-    SECURE_SSL_REDIRECT            = False   # Render proxy handles TLS
+    SECURE_SSL_REDIRECT            = False
     SECURE_PROXY_SSL_HEADER        = ("HTTP_X_FORWARDED_PROTO", "https")
     SESSION_COOKIE_SECURE          = True
     CSRF_COOKIE_SECURE             = True
@@ -185,30 +173,21 @@ LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
     "formatters": {
-        "verbose": {
-            "format": "[{levelname}] {asctime} {name}: {message}",
-            "style": "{",
-        },
+        "verbose": {"format": "[{levelname}] {asctime} {name}: {message}", "style": "{"},
     },
     "handlers": {
-        "console": {
-            "class": "logging.StreamHandler",
-            "formatter": "verbose",
-        },
+        "console": {"class": "logging.StreamHandler", "formatter": "verbose"},
     },
-    "root": {
-        "handlers": ["console"],
-        "level": "INFO",
-    },
+    "root": {"handlers": ["console"], "level": "INFO"},
     "loggers": {
         "chatbot": {
-            "handlers": ["console"],
-            "level": "DEBUG" if DEBUG else "INFO",
+            "handlers":  ["console"],
+            "level":     "DEBUG" if DEBUG else "INFO",
             "propagate": False,
         },
         "django.request": {
-            "handlers": ["console"],
-            "level": "WARNING",
+            "handlers":  ["console"],
+            "level":     "WARNING",
             "propagate": False,
         },
     },
