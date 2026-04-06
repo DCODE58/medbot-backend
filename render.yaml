@@ -1,15 +1,13 @@
-
 services:
   - type: web
-    name: medbbot-backend
+    name: medbot-backend
     runtime: python
     region: oregon
     plan: free
-    pythonVersion: "3.11.9"
 
     buildCommand: >
       pip install --upgrade pip setuptools wheel &&
-      pip install --only-binary=:all: -r requirements.txt &&
+      pip install -r requirements.txt &&
       python -m nltk.downloader -q -d /tmp/nltk_data punkt punkt_tab stopwords wordnet &&
       python manage.py collectstatic --noinput &&
       python manage.py migrate --noinput &&
@@ -47,12 +45,6 @@ services:
 
       - key: NLTK_DATA
         value: "/tmp/nltk_data"
-
-      - key: PYTHON_VERSION
-        value: "3.11.9"
-
-      - key: PIP_ONLY_BINARY
-        value: ":all:"
 
 databases:
   - name: medbot-db
