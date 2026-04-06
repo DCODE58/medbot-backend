@@ -1,17 +1,5 @@
 """
 Django settings for medical_chatbot -- Render + Vercel production config.
-
-Fix history:
-  1. SECURE_SSL_REDIRECT = False  -- Render terminates TLS at the proxy layer.
-  2. STATICFILES_DIRS guarded with os.path.isdir().
-  3. STORAGES dict replaces deprecated STATICFILES_STORAGE string.
-  4. ALLOWED_HOSTS split strips whitespace.
-  5. ssl_require removed -- psycopg3 reads sslmode from DATABASE_URL.
-  6. DatabaseCache replaced with LocMemCache -- DatabaseCache requires a
-     django_cache_table that must be created via a management command, which
-     is fragile on Render (build vs runtime DB context mismatch). LocMemCache
-     is in-process, needs zero setup, never throws ProgrammingError, and is
-     faster for reads. The cache is per-worker which is fine for this workload.
 """
 
 import os
@@ -45,6 +33,10 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    # FIX: django.contrib.postgres MUST be in INSTALLED_APPS when using
+    # SearchVectorField, GinIndex, or any postgres-specific model fields.
+    # Without it, migrations can fail and the ORM layer may error on import.
+    "django.contrib.postgres",
     "corsheaders",
     "chatbot",
 ]
@@ -104,11 +96,7 @@ else:
     }
 
 # -- Cache -------------------------------------------------------------------
-# LocMemCache: in-process memory cache, zero external dependencies.
-# No database table, no migration, no management command required.
-# Each gunicorn worker maintains its own cache -- perfectly fine because
-# the cached data (disease list, symptom list) is identical across workers
-# and the RAG singleton holds the fitted vectorizer independently anyway.
+# LocMemCache: in-process, zero external dependencies, no migration needed.
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
@@ -134,14 +122,7 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
 
 CORS_ALLOW_CREDENTIALS = False
 
-CORS_ALLOW_METHODS = [
-    "DELETE",
-    "GET",
-    "OPTIONS",
-    "PATCH",
-    "POST",
-    "PUT",
-]
+CORS_ALLOW_METHODS = ["DELETE", "GET", "OPTIONS", "PATCH", "POST", "PUT"]
 
 CORS_ALLOW_HEADERS = [
     "accept",
@@ -159,8 +140,10 @@ CORS_ALLOW_HEADERS = [
 STATIC_URL  = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
+# FIX: only add to STATICFILES_DIRS if the directory exists AND is not the
+# same as STATIC_ROOT (Django raises SuspiciousFileOperation otherwise).
 _custom_static = BASE_DIR / "static"
-STATICFILES_DIRS = [_custom_static] if _custom_static.is_dir() else []
+STATICFILES_DIRS = [_custom_static] if _custom_static.is_dir() and _custom_static != STATIC_ROOT else []
 
 STORAGES = {
     "default": {
