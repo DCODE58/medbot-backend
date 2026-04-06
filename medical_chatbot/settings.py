@@ -1,16 +1,17 @@
 """
-Django settings for medical_chatbot — Render + Vercel production config.
+Django settings for medical_chatbot -- Render + Vercel production config.
 
-Fixes applied:
-  1. SECURE_SSL_REDIRECT = False  — Render terminates TLS at the proxy layer;
-     redirecting again causes an infinite loop.  SECURE_PROXY_SSL_HEADER is
-     kept so Django still knows the original request was HTTPS.
-  2. STATICFILES_DIRS guarded with os.path.isdir() so collectstatic never
-     crashes on a fresh clone that has no custom static assets yet.
-  3. STATICFILES_STORAGE replaced with the STORAGES dict (Django 4.2+).
-     The old string form still works but emits a deprecation warning.
-  4. ALLOWED_HOSTS split strips whitespace around each entry.
-  5. ssl_require removed — psycopg3 reads sslmode from DATABASE_URL directly.
+Fix history:
+  1. SECURE_SSL_REDIRECT = False  -- Render terminates TLS at the proxy layer.
+  2. STATICFILES_DIRS guarded with os.path.isdir().
+  3. STORAGES dict replaces deprecated STATICFILES_STORAGE string.
+  4. ALLOWED_HOSTS split strips whitespace.
+  5. ssl_require removed -- psycopg3 reads sslmode from DATABASE_URL.
+  6. DatabaseCache replaced with LocMemCache -- DatabaseCache requires a
+     django_cache_table that must be created via a management command, which
+     is fragile on Render (build vs runtime DB context mismatch). LocMemCache
+     is in-process, needs zero setup, never throws ProgrammingError, and is
+     faster for reads. The cache is per-worker which is fine for this workload.
 """
 
 import os
@@ -23,7 +24,7 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# ── Core ──────────────────────────────────────────────────────────────────────
+# -- Core --------------------------------------------------------------------
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
     raise ValueError("SECRET_KEY environment variable is not set")
@@ -36,7 +37,7 @@ ALLOWED_HOSTS = [
     if h.strip()
 ]
 
-# ── Apps ──────────────────────────────────────────────────────────────────────
+# -- Apps --------------------------------------------------------------------
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -48,7 +49,7 @@ INSTALLED_APPS = [
     "chatbot",
 ]
 
-# ── Middleware ────────────────────────────────────────────────────────────────
+# -- Middleware ---------------------------------------------------------------
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
@@ -81,14 +82,13 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "medical_chatbot.wsgi.application"
 
-# ── Database ──────────────────────────────────────────────────────────────────
+# -- Database ----------------------------------------------------------------
 _database_url = os.getenv("DATABASE_URL")
 if _database_url:
     DATABASES = {
         "default": dj_database_url.config(
             default=_database_url,
             conn_max_age=600,
-            # ssl_require removed — psycopg3 reads sslmode from DATABASE_URL directly
         )
     }
 else:
@@ -103,19 +103,24 @@ else:
         }
     }
 
-# ── Cache ─────────────────────────────────────────────────────────────────────
+# -- Cache -------------------------------------------------------------------
+# LocMemCache: in-process memory cache, zero external dependencies.
+# No database table, no migration, no management command required.
+# Each gunicorn worker maintains its own cache -- perfectly fine because
+# the cached data (disease list, symptom list) is identical across workers
+# and the RAG singleton holds the fitted vectorizer independently anyway.
 CACHES = {
     "default": {
-        "BACKEND": "django.core.cache.backends.db.DatabaseCache",
-        "LOCATION": "django_cache_table",
-        "TIMEOUT": 300,
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "dawa-cache",
+        "TIMEOUT": 3600,
         "OPTIONS": {
             "MAX_ENTRIES": 2000,
         },
     }
 }
 
-# ── CORS ──────────────────────────────────────────────────────────────────────
+# -- CORS --------------------------------------------------------------------
 _cors_raw = os.getenv(
     "CORS_ALLOWED_ORIGINS",
     "http://localhost:3000,http://127.0.0.1:3000,"
@@ -150,8 +155,8 @@ CORS_ALLOW_HEADERS = [
     "x-requested-with",
 ]
 
-# ── Static files ──────────────────────────────────────────────────────────────
-STATIC_URL = "/static/"
+# -- Static files ------------------------------------------------------------
+STATIC_URL  = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
 _custom_static = BASE_DIR / "static"
@@ -162,11 +167,11 @@ STORAGES = {
         "BACKEND": "django.core.files.storage.FileSystemStorage",
     },
     "staticfiles": {
-        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+        "BACKEND": "whitenoise.storage.CompressedStaticFilesStorage",
     },
 }
 
-# ── Auth password validators ──────────────────────────────────────────────────
+# -- Auth password validators ------------------------------------------------
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
@@ -174,25 +179,25 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
-# ── i18n ─────────────────────────────────────────────────────────────────────
+# -- i18n --------------------------------------------------------------------
 LANGUAGE_CODE = "en-us"
-TIME_ZONE = "Africa/Nairobi"
-USE_I18N = True
-USE_TZ = True
+TIME_ZONE     = "Africa/Nairobi"
+USE_I18N      = True
+USE_TZ        = True
 
-# ── Security ─────────────────────────────────────────────────────────────────
+# -- Security (production only) ----------------------------------------------
 if not DEBUG:
-    SECURE_SSL_REDIRECT = False
-    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
-    SECURE_HSTS_SECONDS = 31536000
+    SECURE_SSL_REDIRECT            = False   # Render proxy handles TLS
+    SECURE_PROXY_SSL_HEADER        = ("HTTP_X_FORWARDED_PROTO", "https")
+    SESSION_COOKIE_SECURE          = True
+    CSRF_COOKIE_SECURE             = True
+    SECURE_HSTS_SECONDS            = 31536000
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
-    SECURE_CONTENT_TYPE_NOSNIFF = True
+    SECURE_CONTENT_TYPE_NOSNIFF    = True
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# ── Logging ───────────────────────────────────────────────────────────────────
+# -- Logging -----------------------------------------------------------------
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
