@@ -2,35 +2,43 @@
 """
 Medical Chatbot API Views — pure JSON responses.
 
-API contract (matches frontend index.html):
-  POST /api/chat/       { message, session_id }
-  POST /api/hospitals/  { latitude, longitude, session_id, emergency_id? }
-  POST /api/feedback/   { session_id, disease, rating, feedback }
-  GET  /api/health/     → { status: "ok" }
+Architecture change vs original:
+  The original view did DB writes (UserProfile, ChatSession, ChatMessage)
+  BEFORE NLP and RAG.  Any DB hiccup (stale connection, cold-start latency,
+  missing table) therefore killed the entire response with 500.
+
+  New order inside process_message:
+    1. Parse + validate input          (no DB)
+    2. Rate-limit check                (in-memory cache only)
+    3. NLP symptom extraction          (no DB — hardcoded dict + cached ORM)
+    4. Emergency detection             (cached ORM, falls back to empty list)
+    5. RAG retrieval                   (cached ORM, falls back gracefully)
+    6. Build response text             (no DB)
+    7. Persist to DB (non-blocking)    (each write in its own try/except)
+    8. Return JsonResponse
+
+  This means the chat ALWAYS responds even when the database is temporarily
+  unreachable, restarting, or waking from sleep (Render free-tier behaviour).
 """
 
 import json
 import logging
 from math import atan2, cos, radians, sin, sqrt
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import requests
 from django.core.cache import cache
-from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from .models import (
-    ChatMessage, ChatSession, EmergencyLog,
-    FirstAidFeedback, SymptomLog, UserProfile,
-)
 from .nlp_processor import MedicalNLPProcessor
 from .rag_retriever import get_rag_retriever
 
-logger        = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
+
 nlp_processor = MedicalNLPProcessor()
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -47,23 +55,38 @@ API_REQUEST_TIMEOUT_S = 12
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 
-def _client_ip(request) -> str:
-    xff = request.META.get("HTTP_X_FORWARDED_FOR", "")
-    return xff.split(",")[0].strip() if xff else request.META.get("REMOTE_ADDR", "")
+def _client_ip(request) -> Optional[str]:
+    """Return client IP, or None if unavailable/unparseable."""
+    try:
+        xff = request.META.get("HTTP_X_FORWARDED_FOR", "")
+        ip  = xff.split(",")[0].strip() if xff else request.META.get("REMOTE_ADDR", "")
+        return ip if ip else None
+    except Exception:
+        return None
 
 
 def _get_or_create_profile(request, session_id: str):
+    """
+    Fetch or create a UserProfile for this session.
+    Uses get_or_create (atomic) to avoid race conditions.
+    Returns None on any DB error so callers can degrade gracefully.
+    """
+    from .models import UserProfile
     try:
-        profile = UserProfile.objects.get(session_id=session_id)
-        profile.last_seen = timezone.now()
-        profile.save(update_fields=["last_seen"])
-        return profile
-    except UserProfile.DoesNotExist:
-        return UserProfile.objects.create(
+        profile, created = UserProfile.objects.get_or_create(
             session_id=session_id,
-            ip_address=_client_ip(request),
-            user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
+            defaults={
+                "ip_address": _client_ip(request),
+                "user_agent": (request.META.get("HTTP_USER_AGENT") or "")[:500],
+            },
         )
+        if not created:
+            # fire-and-forget last_seen update — don't block on it
+            UserProfile.objects.filter(pk=profile.pk).update(last_seen=timezone.now())
+        return profile
+    except Exception as exc:
+        logger.warning("UserProfile get_or_create failed: %s", exc)
+        return None
 
 
 def _haversine(lat1, lon1, lat2, lon2) -> float:
@@ -78,7 +101,6 @@ def _haversine(lat1, lon1, lat2, lon2) -> float:
 
 
 def _format_response(disease: str, first_aid: Dict, confidence: float) -> str:
-    """Build the markdown string consumed by renderMarkdown() in the frontend."""
     lines = [
         f"**Based on your symptoms, you may have {disease}**\n",
         "**First Aid Steps:**",
@@ -108,7 +130,6 @@ def _rate_limit_ok(session_id: str) -> bool:
 
 @require_http_methods(["GET"])
 def health_check(request):
-    """Used by render.yaml healthCheckPath: /api/health/"""
     return JsonResponse({"status": "ok"})
 
 
@@ -117,26 +138,17 @@ def health_check(request):
 @csrf_exempt
 @require_http_methods(["POST", "OPTIONS"])
 def process_message(request):
-    """
-    Process a user symptom message through NLP → emergency detection → RAG.
-
-    Request:  { "message": str, "session_id": str }
-
-    Normal:    { type:"normal", message, symptoms_detected, session_id }
-    Emergency: { type:"emergency", severity, message, emergencies,
-                 action:"request_location", emergency_id, session_id }
-    Error:     { type:"error", message }  — HTTP 4xx / 5xx
-    """
     if request.method == "OPTIONS":
         return JsonResponse({}, status=200)
 
+    # ── 1. Parse input ────────────────────────────────────────────────────────
     try:
         body = json.loads(request.body)
     except (json.JSONDecodeError, ValueError):
         return JsonResponse({"type": "error", "message": "Invalid JSON body."}, status=400)
 
-    user_message = body.get("message", "").strip()
-    session_id   = body.get("session_id", "").strip()
+    user_message = (body.get("message") or "").strip()
+    session_id   = (body.get("session_id") or "").strip()
 
     if not user_message:
         return JsonResponse({"type": "error", "message": "Message cannot be empty."}, status=400)
@@ -148,124 +160,160 @@ def process_message(request):
     if not session_id:
         return JsonResponse({"type": "error", "message": "session_id is required."}, status=400)
 
+    # ── 2. Rate limit ─────────────────────────────────────────────────────────
     if not _rate_limit_ok(session_id):
         return JsonResponse({"type": "error", "message": "Too many requests — please wait."}, status=429)
 
+    # ── 3. NLP — symptom extraction (hardcoded dict, no DB required) ──────────
     try:
-        profile = _get_or_create_profile(request, session_id)
+        symptoms = nlp_processor.extract_symptoms(user_message)
+    except Exception as exc:
+        logger.error("extract_symptoms failed: %s", exc, exc_info=True)
+        symptoms = []
 
-        with transaction.atomic():
-            session, _ = ChatSession.objects.get_or_create(
-                session_id=session_id, defaults={"user_profile": profile}
-            )
-            if not session.user_profile:
-                session.user_profile = profile
-                session.save(update_fields=["user_profile"])
-            user_msg = ChatMessage.objects.create(
-                session=session, user_profile=profile,
-                role="user", content=user_message,
-            )
+    # ── 4. Emergency detection (uses cached DB, falls back to []) ─────────────
+    try:
+        emergencies = nlp_processor.detect_emergency(user_message)
+    except Exception as exc:
+        logger.error("detect_emergency failed: %s", exc, exc_info=True)
+        emergencies = []
 
-        # NLP
-        try:
-            symptoms = nlp_processor.extract_symptoms(user_message)
-        except Exception as exc:
-            logger.error("extract_symptoms: %s", exc, exc_info=True)
-            symptoms = []
+    # ── 5. Handle emergency path ──────────────────────────────────────────────
+    if emergencies:
+        emergencies.sort(key=lambda x: SEVERITY_LEVELS.get(x["severity"], 0), reverse=True)
 
-        # Emergency detection
-        try:
-            emergencies = nlp_processor.detect_emergency(user_message)
-        except Exception as exc:
-            logger.error("detect_emergency: %s", exc, exc_info=True)
-            emergencies = []
-
-        if emergencies:
-            emergencies.sort(key=lambda x: SEVERITY_LEVELS.get(x["severity"], 0), reverse=True)
-            eid = None
-            try:
-                elog = EmergencyLog.objects.create(
-                    user_profile=profile,
-                    emergency_keywords=[e["keyword"] for e in emergencies],
-                    severity=emergencies[0]["severity"],
-                    raw_input=user_message,
-                )
-                eid = elog.id
-            except Exception as exc:
-                logger.error("EmergencyLog create: %s", exc)
-
-            try:
-                user_msg.emergency_detected = True
-                user_msg.save(update_fields=["emergency_detected"])
-            except Exception:
-                pass
-
-            return JsonResponse({
-                "type":         "emergency",
-                "severity":     emergencies[0]["severity"],
-                "message":      emergencies[0]["message"],
-                "emergencies":  emergencies,
-                "action":       "request_location",
-                "emergency_id": eid,
-                "session_id":   session_id,
-            })
-
-        # RAG retrieval
-        results, matched = [], []
-        if symptoms:
-            try:
-                results = get_rag_retriever().retrieve_relevant_first_aid(user_message, symptoms)
-                matched = [{"name": r["disease"], "confidence": r["confidence"]} for r in results]
-            except Exception as exc:
-                logger.error("RAG retrieve: %s", exc, exc_info=True)
-
-            try:
-                SymptomLog.objects.create(
-                    user_profile=profile,
-                    symptoms=symptoms,
-                    raw_input=user_message,
-                    matched_diseases=matched,
-                )
-            except Exception as exc:
-                logger.error("SymptomLog create: %s", exc)
-
-        # Build response text
-        if results:
-            best = results[0]
-            response_text = _format_response(best["disease"], best["first_aid"], best["confidence"])
-        elif symptoms:
-            response_text = (
-                f"I identified these symptoms: {', '.join(symptoms)}.\n\n"
-                "I couldn't match them to a specific condition in our database. "
-                "Please provide more detail or consult a healthcare provider."
-            )
-        else:
-            response_text = (
-                "I couldn't identify any symptoms from your message.\n\n"
-                "Please describe how you feel — for example: "
-                "*'I have fever, headache, and body aches'*."
-            )
-
-        try:
-            ChatMessage.objects.create(
-                session=session, user_profile=profile,
-                role="bot", content=response_text,
-            )
-        except Exception as exc:
-            logger.error("Bot ChatMessage save: %s", exc)
+        # Persist emergency log (non-blocking — failure doesn't affect response)
+        eid = _save_emergency_log(request, session_id, user_message, emergencies)
 
         return JsonResponse({
-            "type":              "normal",
-            "message":           response_text,
-            "symptoms_detected": symptoms,
-            "session_id":        session_id,
+            "type":         "emergency",
+            "severity":     emergencies[0]["severity"],
+            "message":      emergencies[0]["message"],
+            "emergencies":  emergencies,
+            "action":       "request_location",
+            "emergency_id": eid,
+            "session_id":   session_id,
         })
 
-    except ValidationError as exc:
-        return JsonResponse({"type": "error", "message": str(exc)}, status=400)
+    # ── 6. RAG retrieval (uses cached DB, falls back to []) ───────────────────
+    results = []
+    if symptoms:
+        try:
+            results = get_rag_retriever().retrieve_relevant_first_aid(user_message, symptoms)
+        except Exception as exc:
+            logger.error("RAG retrieve failed: %s", exc, exc_info=True)
+
+    # ── 7. Build response text ────────────────────────────────────────────────
+    if results:
+        best = results[0]
+        response_text = _format_response(best["disease"], best["first_aid"], best["confidence"])
+    elif symptoms:
+        response_text = (
+            f"I identified these symptoms: {', '.join(symptoms)}.\n\n"
+            "I couldn't match them to a specific condition in our database. "
+            "Please provide more detail or consult a healthcare provider."
+        )
+    else:
+        response_text = (
+            "I couldn't identify any symptoms from your message.\n\n"
+            "Please describe how you feel — for example: "
+            "*'I have fever, headache, and body aches'*."
+        )
+
+    # ── 8. Persist to DB (non-blocking) ───────────────────────────────────────
+    _save_chat(request, session_id, user_message, response_text, symptoms, results)
+
+    # ── 9. Return ─────────────────────────────────────────────────────────────
+    return JsonResponse({
+        "type":              "normal",
+        "message":           response_text,
+        "symptoms_detected": symptoms,
+        "session_id":        session_id,
+    })
+
+
+# ── Non-blocking DB helpers ───────────────────────────────────────────────────
+
+def _save_chat(request, session_id, user_message, response_text, symptoms, results):
+    """
+    Persist UserProfile / ChatSession / ChatMessage / SymptomLog.
+    Every operation is individually guarded — a failure in one step
+    does NOT prevent subsequent steps or the HTTP response.
+    """
+    from .models import ChatMessage, ChatSession, SymptomLog
+
+    profile = _get_or_create_profile(request, session_id)
+
+    # ChatSession
+    session = None
+    try:
+        if profile:
+            session, _ = ChatSession.objects.get_or_create(
+                session_id=session_id,
+                defaults={"user_profile": profile},
+            )
+        else:
+            session, _ = ChatSession.objects.get_or_create(session_id=session_id)
     except Exception as exc:
-        logger.error("process_message unhandled: %s", exc, exc_info=True)
-        return JsonResponse({"type": "error", "message": "Server error — please try again."}, status=500)
+        logger.warning("ChatSession get_or_create failed: %s", exc)
+
+    # User ChatMessage
+    if session:
+        try:
+            ChatMessage.objects.create(
+                session=session,
+                user_profile=profile,
+                role="user",
+                content=user_message,
+            )
+        except Exception as exc:
+            logger.warning("User ChatMessage save failed: %s", exc)
+
+        # Bot ChatMessage
+        try:
+            ChatMessage.objects.create(
+                session=session,
+                user_profile=profile,
+                role="bot",
+                content=response_text,
+            )
+        except Exception as exc:
+            logger.warning("Bot ChatMessage save failed: %s", exc)
+
+    # SymptomLog
+    if profile and symptoms:
+        try:
+            matched = [{"name": r["disease"], "confidence": r["confidence"]} for r in results]
+            SymptomLog.objects.create(
+                user_profile=profile,
+                symptoms=symptoms,
+                raw_input=user_message,
+                matched_diseases=matched,
+            )
+        except Exception as exc:
+            logger.warning("SymptomLog save failed: %s", exc)
+
+
+def _save_emergency_log(request, session_id, user_message, emergencies) -> Optional[int]:
+    """
+    Persist an EmergencyLog and return its id (or None on failure).
+    """
+    from .models import EmergencyLog
+
+    profile = _get_or_create_profile(request, session_id)
+    if not profile:
+        return None
+    try:
+        elog = EmergencyLog.objects.create(
+            user_profile=profile,
+            emergency_keywords=[e["keyword"] for e in emergencies],
+            severity=emergencies[0]["severity"],
+            raw_input=user_message,
+        )
+        return elog.id
+    except Exception as exc:
+        logger.warning("EmergencyLog save failed: %s", exc)
+        return None
 
 
 # ── Hospitals ─────────────────────────────────────────────────────────────────
@@ -273,13 +321,6 @@ def process_message(request):
 @csrf_exempt
 @require_http_methods(["POST", "OPTIONS"])
 def get_nearby_hospitals(request):
-    """
-    Query OpenStreetMap Overpass API for nearby hospitals / clinics.
-
-    Request:  { "latitude": float, "longitude": float,
-                "session_id": str, "emergency_id": int? }
-    Response: { "hospitals": [...], "user_location": {lat, lng} }
-    """
     if request.method == "OPTIONS":
         return JsonResponse({}, status=200)
 
@@ -290,7 +331,7 @@ def get_nearby_hospitals(request):
 
     lat          = body.get("latitude")
     lng          = body.get("longitude")
-    session_id   = body.get("session_id", "").strip()
+    session_id   = (body.get("session_id") or "").strip()
     emergency_id = body.get("emergency_id")
 
     if lat is None or lng is None:
@@ -302,16 +343,15 @@ def get_nearby_hospitals(request):
     if not (-90 <= lat <= 90) or not (-180 <= lng <= 180):
         return JsonResponse({"error": "Coordinates out of valid range."}, status=400)
 
-    # Update emergency log with shared location
+    # Update emergency log (non-blocking)
     if emergency_id:
         try:
-            elog = EmergencyLog.objects.get(id=int(emergency_id))
-            elog.location_shared = True
-            elog.latitude        = lat
-            elog.longitude       = lng
-            elog.save(update_fields=["location_shared", "latitude", "longitude"])
-        except (EmergencyLog.DoesNotExist, ValueError):
-            pass
+            from .models import EmergencyLog
+            EmergencyLog.objects.filter(id=int(emergency_id)).update(
+                location_shared=True, latitude=lat, longitude=lng
+            )
+        except Exception as exc:
+            logger.warning("EmergencyLog location update failed: %s", exc)
 
     overpass_query = (
         f"[out:json][timeout:{OVERPASS_TIMEOUT_S}];\n"
@@ -345,57 +385,49 @@ def get_nearby_hospitals(request):
     for el in osm_data.get("elements", []):
         try:
             tags   = el.get("tags", {})
-            # node → lat/lon directly; way → center dict
             el_lat = el.get("lat") or (el.get("center") or {}).get("lat")
             el_lon = el.get("lon") or (el.get("center") or {}).get("lon")
             if el_lat is None or el_lon is None:
                 continue
             name = (
-                tags.get("name") or
-                tags.get("name:en") or
-                tags.get("operator") or
-                "Medical Facility"
+                tags.get("name") or tags.get("name:en") or
+                tags.get("operator") or "Medical Facility"
             )
             addr_parts = list(filter(None, [
                 tags.get("addr:housenumber"),
                 tags.get("addr:street"),
                 tags.get("addr:city") or tags.get("addr:town"),
             ]))
-            address = ", ".join(addr_parts) or "Address unavailable"
             hospitals.append({
                 "name":     name,
                 "lat":      el_lat,
                 "lon":      el_lon,
-                "address":  address,
+                "address":  ", ".join(addr_parts) or "Address unavailable",
                 "phone":    tags.get("phone") or tags.get("contact:phone") or "",
                 "distance": _haversine(lat, lng, el_lat, el_lon),
             })
         except (KeyError, TypeError):
             continue
 
-    # Deduplicate by name + approximate coords, then sort by distance
-    seen: set = set()
-    unique = []
+    seen, unique = set(), []
     for h in sorted(hospitals, key=lambda x: x["distance"]):
         key = (h["name"].lower(), round(h["lat"], 3), round(h["lon"], 3))
         if key not in seen:
             seen.add(key)
             unique.append(h)
-
     unique = unique[:HOSPITAL_LIMIT]
 
+    # Update hospitals_shown count (non-blocking)
     if emergency_id and unique:
         try:
-            elog = EmergencyLog.objects.get(id=int(emergency_id))
-            elog.nearby_hospitals_shown = len(unique)
-            elog.save(update_fields=["nearby_hospitals_shown"])
-        except (EmergencyLog.DoesNotExist, ValueError):
-            pass
+            from .models import EmergencyLog
+            EmergencyLog.objects.filter(id=int(emergency_id)).update(
+                nearby_hospitals_shown=len(unique)
+            )
+        except Exception as exc:
+            logger.warning("EmergencyLog hospitals_shown update failed: %s", exc)
 
-    return JsonResponse({
-        "hospitals":     unique,
-        "user_location": {"lat": lat, "lng": lng},
-    })
+    return JsonResponse({"hospitals": unique, "user_location": {"lat": lat, "lng": lng}})
 
 
 # ── Feedback ──────────────────────────────────────────────────────────────────
@@ -403,13 +435,6 @@ def get_nearby_hospitals(request):
 @csrf_exempt
 @require_http_methods(["POST", "OPTIONS"])
 def submit_feedback(request):
-    """
-    Record user star rating + optional comment.
-
-    Request:  { "session_id": str, "disease": str,
-                "rating": int (1-5), "feedback": str }
-    Response: { "status": "success", "feedback_id": int }
-    """
     if request.method == "OPTIONS":
         return JsonResponse({}, status=200)
 
@@ -418,30 +443,28 @@ def submit_feedback(request):
     except (json.JSONDecodeError, ValueError):
         return JsonResponse({"error": "Invalid JSON body."}, status=400)
 
-    session_id    = body.get("session_id", "").strip()
-    disease_name  = body.get("disease", "").strip()[:200]
+    session_id    = (body.get("session_id") or "").strip()
+    disease_name  = (body.get("disease") or "")[:200].strip()
     rating        = body.get("rating")
-    feedback_text = body.get("feedback", "").strip()[:5000]
+    feedback_text = (body.get("feedback") or "")[:5000].strip()
 
     if not session_id:
         return JsonResponse({"error": "session_id is required."}, status=400)
     if not isinstance(rating, int) or not 1 <= rating <= 5:
         return JsonResponse({"error": "rating must be an integer between 1 and 5."}, status=400)
 
-    # Create profile if this is the first request from this session
     try:
-        profile = UserProfile.objects.get(session_id=session_id)
-    except UserProfile.DoesNotExist:
-        profile = UserProfile.objects.create(session_id=session_id)
+        from .models import FirstAidFeedback, SymptomLog, UserProfile
 
-    symptom_log = (
-        SymptomLog.objects
-        .filter(user_profile=profile)
-        .order_by("-timestamp")
-        .first()
-    )
+        profile, _ = UserProfile.objects.get_or_create(session_id=session_id)
 
-    try:
+        symptom_log = (
+            SymptomLog.objects
+            .filter(user_profile=profile)
+            .order_by("-timestamp")
+            .first()
+        )
+
         fb = FirstAidFeedback.objects.create(
             user_profile=profile,
             symptom_log=symptom_log,
@@ -451,6 +474,7 @@ def submit_feedback(request):
             feedback_text=feedback_text,
         )
         return JsonResponse({"status": "success", "feedback_id": fb.id})
+
     except Exception as exc:
-        logger.error("FirstAidFeedback create: %s", exc, exc_info=True)
+        logger.error("submit_feedback failed: %s", exc, exc_info=True)
         return JsonResponse({"error": "Server error saving feedback."}, status=500)
