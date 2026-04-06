@@ -1,9 +1,11 @@
+# chatbot/urls.py
+
 from django.urls import path
 from . import views
 
 urlpatterns = [
-    path("chat/",      views.process_message,     name="process_message"),
-    path("hospitals/", views.get_nearby_hospitals, name="get_nearby_hospitals"),
-    path("feedback/",  views.submit_feedback,      name="submit_feedback"),
-    path("health/",    views.health_check,         name="health_check"),
+    path('chat/', views.chat_view, name='chat'),
+    path('hospitals/', views.hospitals_view, name='hospitals'),
+    path('feedback/', views.feedback_view, name='feedback'),
+    path('health/', views.health_check, name='health'),
 ]
