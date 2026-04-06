@@ -1,260 +1,308 @@
-# chatbot/rag_retriever.py
-
 import hashlib
 import json
 import logging
 import re
+import time
 from typing import Dict, List, Optional
 
 from django.core.cache import cache
-from django.db.models import Prefetch, Max, Count
+from django.db.models import Prefetch, Count
 from django.db.utils import OperationalError, ProgrammingError
 
 logger = logging.getLogger(__name__)
 
-DISEASE_CACHE_KEY     = "rag:diseases:v5"
-DISEASE_CACHE_TIMEOUT = 3600   # 1 hour
-RESULT_CACHE_TIMEOUT  = 300    # 5 minutes
-TFIDF_THRESHOLD       = 0.04
-MAX_RESULTS           = 3
+DISEASE_CACHE_KEY     = "rag:diseases:v6"
+DISEASE_CACHE_TIMEOUT = 3600
+RESULT_CACHE_TIMEOUT  = 300
+
+TFIDF_THRESHOLD = 0.04
+MAX_RESULTS = 3
 
 
 class RAGRetriever:
 
-    def __init__(self) -> None:
+    def __init__(self):
         self._vectorizer = None
         self._corpus_matrix = None
-        self._corpus_hash: Optional[str] = None
+        self._corpus_hash = None
+        self._last_load_time = 0
 
-    # ── Cache Versioning ──────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────
+    # SAFE DB CHECK
+    # ─────────────────────────────────────────────
 
-    def _get_cache_version(self) -> str:
-        from .models import Disease
+    def _db_ready(self) -> bool:
         try:
-            meta = Disease.objects.aggregate(
-                count=Count("id"),
-                max_id=Max("id")
-            )
-            return f"{meta['count']}-{meta['max_id']}"
+            from django.db import connection
+            connection.ensure_connection()
+            return True
         except Exception:
-            return "unknown"
+            return False
 
-    # ── Load Diseases ─────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────
+    # STABLE CACHE VERSION
+    # ─────────────────────────────────────────────
+
+    def _cache_version(self) -> str:
+        from .models import Disease
+
+        try:
+            # stable signal: table size only
+            count = Disease.objects.count()
+            return f"disease:v6:{count}"
+        except Exception:
+            return "disease:unknown"
+
+    # ─────────────────────────────────────────────
+    # LOAD DISEASES (LAZY + RETRY SAFE)
+    # ─────────────────────────────────────────────
 
     def _load_diseases(self) -> List[Dict]:
-        cache_key = f"{DISEASE_CACHE_KEY}:{self._get_cache_version()}"
 
+        cache_key = f"{DISEASE_CACHE_KEY}:{self._cache_version()}"
         cached = cache.get(cache_key)
+
         if cached is not None:
             return cached
 
-        try:
-            from .models import Disease, FirstAidProcedure
+        # retry loop (fixes Render cold start issue)
+        for attempt in range(5):
+            try:
+                if not self._db_ready():
+                    raise OperationalError("DB not ready")
 
-            diseases = Disease.objects.only(
-                "id", "name", "description", "common_symptoms"
-            ).prefetch_related(
-                Prefetch(
-                    "first_aid_procedures",
-                    queryset=FirstAidProcedure.objects.only(
-                        "disease_id", "steps", "warning_notes", "when_to_seek_help"
-                    ),
-                    to_attr="_fa",
+                from .models import Disease, FirstAidProcedure
+
+                diseases = Disease.objects.only(
+                    "id", "name", "description", "common_symptoms"
+                ).prefetch_related(
+                    Prefetch(
+                        "first_aid_procedures",
+                        queryset=FirstAidProcedure.objects.only(
+                            "steps",
+                            "warning_notes",
+                            "when_to_seek_help"
+                        ),
+                        to_attr="_fa"
+                    )
                 )
-            )
 
-            data: List[Dict] = []
+                data = []
 
-            for d in diseases:
-                # Weighted text for better ranking
-                search_text = " ".join([
-                    (d.name or "") * 3,
-                    (d.common_symptoms or "") * 2,
-                    (d.description or "")
-                ]).lower()
+                for d in diseases:
+                    text = " ".join([
+                        (d.name or "") * 3,
+                        (d.common_symptoms or "") * 2,
+                        (d.description or "")
+                    ]).lower()
 
-                fa_orm = (d._fa[0] if getattr(d, "_fa", None) else None)
+                    fa = d._fa[0] if getattr(d, "_fa", None) else None
 
-                fa_dict: Optional[Dict] = None
-                if fa_orm:
-                    fa_dict = {
-                        "steps":             fa_orm.steps or "",
-                        "warning_notes":     fa_orm.warning_notes or "",
-                        "when_to_seek_help": fa_orm.when_to_seek_help or "",
-                    }
+                    data.append({
+                        "id": d.id,
+                        "name": d.name,
+                        "search_text": text,
+                        "first_aid": {
+                            "steps": fa.steps if fa else "",
+                            "warning_notes": fa.warning_notes if fa else "",
+                            "when_to_seek_help": fa.when_to_seek_help if fa else "",
+                        } if fa else None
+                    })
 
-                data.append({
-                    "id":          d.id,
-                    "name":        d.name,
-                    "search_text": search_text,
-                    "first_aid":   fa_dict,
-                })
+                cache.set(cache_key, data, DISEASE_CACHE_TIMEOUT)
+                self._last_load_time = time.time()
 
-            cache.set(cache_key, data, DISEASE_CACHE_TIMEOUT)
-            return data
+                logger.info("RAG loaded %d diseases", len(data))
+                return data
 
-        except (OperationalError, ProgrammingError):
-            logger.warning("RAG: DB not ready when loading diseases")
-            return []
+            except (OperationalError, ProgrammingError):
+                logger.warning("RAG DB not ready (attempt %d)", attempt + 1)
+                time.sleep(2)
 
-    # ── Vectorizer ────────────────────────────────────────────────────────────
+            except Exception as exc:
+                logger.error("RAG load error: %s", exc)
+                break
 
-    def _get_vectorizer_and_matrix(self, diseases: List[Dict]):
+        return []
+
+    # ─────────────────────────────────────────────
+    # TF-IDF BUILD (SAFE)
+    # ─────────────────────────────────────────────
+
+    def _build_vectorizer(self, diseases: List[Dict]):
+
         corpus = [d["search_text"] for d in diseases]
-
-        # Strong hash (full corpus)
         combined = "|".join(corpus)
+
         new_hash = hashlib.md5(combined.encode()).hexdigest()
 
         if self._vectorizer is None or self._corpus_hash != new_hash:
-            logger.info("RAG: fitting TF-IDF vectorizer on %d diseases", len(corpus))
 
-            from sklearn.feature_extraction.text import TfidfVectorizer
+            try:
+                from sklearn.feature_extraction.text import TfidfVectorizer
 
-            self._vectorizer = TfidfVectorizer(
-                ngram_range=(1, 2),
-                min_df=1,
-                stop_words="english"
-            )
+                self._vectorizer = TfidfVectorizer(
+                    ngram_range=(1, 2),
+                    min_df=1,
+                    stop_words="english"
+                )
 
-            self._corpus_matrix = self._vectorizer.fit_transform(corpus)
-            self._corpus_hash = new_hash
+                self._corpus_matrix = self._vectorizer.fit_transform(corpus)
+                self._corpus_hash = new_hash
 
-            logger.info("RAG: vectorizer ready")
+                logger.info("RAG vectorizer rebuilt (%d docs)", len(corpus))
+
+            except Exception as exc:
+                logger.error("Vectorizer build failed: %s", exc)
+                self._vectorizer = None
+                self._corpus_matrix = None
 
         return self._vectorizer, self._corpus_matrix
 
-    # ── Ranking ───────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────
+    # TF-IDF RANKING
+    # ─────────────────────────────────────────────
 
-    def _tfidf_rank(self, diseases: List[Dict], query: str) -> List[tuple]:
-        if not diseases:
+    def _tfidf_rank(self, diseases, query):
+
+        if not diseases or self._vectorizer is None:
             return []
 
         try:
             from sklearn.metrics.pairwise import cosine_similarity
 
-            vec, matrix = self._get_vectorizer_and_matrix(diseases)
-            query_vec = vec.transform([query.lower()])
-            scores = cosine_similarity(query_vec, matrix)[0]
+            vec, matrix = self._build_vectorizer(diseases)
+            if vec is None:
+                return []
+
+            q_vec = vec.transform([query.lower()])
+            scores = cosine_similarity(q_vec, matrix)[0]
 
             return sorted(
-                zip(diseases, (float(s) for s in scores)),
+                zip(diseases, scores),
                 key=lambda x: x[1],
-                reverse=True,
+                reverse=True
             )
 
         except Exception as exc:
-            logger.error("TF-IDF scoring error: %s", exc)
+            logger.error("TF-IDF error: %s", exc)
             return []
 
-    def _keyword_score(self, disease: Dict, symptoms: List[str]) -> float:
+    # ─────────────────────────────────────────────
+    # KEYWORD FALLBACK
+    # ─────────────────────────────────────────────
+
+    def _keyword_score(self, disease, symptoms):
         text = disease["search_text"]
         hits = sum(
             1 for s in symptoms
             if re.search(rf"\b{re.escape(s)}\b", text)
         )
-        return hits / len(symptoms) if symptoms else 0.0
+        return hits / len(symptoms) if symptoms else 0
 
-    def _build_result(self, disease: Dict, score: float) -> Optional[Dict]:
-        if not disease.get("first_aid"):
-            return None
+    # ─────────────────────────────────────────────
+    # PUBLIC WARMUP
+    # ─────────────────────────────────────────────
 
-        return {
-            "disease":    disease["name"],
-            "confidence": round(score, 4),
-            "first_aid":  disease["first_aid"],
-        }
-
-    # ── Public API ────────────────────────────────────────────────────────────
-
-    def warm_up(self) -> None:
+    def warm_up(self):
         try:
             diseases = self._load_diseases()
-            if diseases:
-                self._get_vectorizer_and_matrix(diseases)
-                logger.info("RAG warm-up complete (%d diseases)", len(diseases))
-            else:
-                logger.warning("RAG warm-up skipped: no diseases found")
 
-        except (OperationalError, ProgrammingError):
-            logger.warning("RAG warm-up skipped: DB not ready")
+            if not diseases:
+                logger.warning("RAG warm-up skipped: no diseases yet")
+                return
+
+            self._build_vectorizer(diseases)
+
+            logger.info("RAG warm-up complete")
+
         except Exception as exc:
-            logger.exception("RAG warm-up failed: %s", exc)
+            logger.warning("RAG warm-up failed: %s", exc)
 
-    def retrieve_relevant_first_aid(
-        self,
-        user_input: str,
-        extracted_symptoms: List[str],
-    ) -> List[Dict]:
+    # ─────────────────────────────────────────────
+    # MAIN RETRIEVAL
+    # ─────────────────────────────────────────────
+
+    def retrieve_relevant_first_aid(self, user_input, extracted_symptoms):
 
         if not extracted_symptoms:
             return []
 
-        symptoms = list({s.lower().strip() for s in extracted_symptoms if s.strip()})
+        symptoms = list({
+            s.lower().strip()
+            for s in extracted_symptoms
+            if s.strip()
+        })
+
         if not symptoms:
             return []
 
         cache_key = "rag:q:" + hashlib.md5(
-            json.dumps(sorted(symptoms) + [user_input[:500]]).encode()
+            json.dumps(sorted(symptoms) + [user_input[:300]]).encode()
         ).hexdigest()
 
         cached = cache.get(cache_key)
-        if cached is not None:
+        if cached:
             return cached
 
-        try:
-            diseases = self._load_diseases()
-            if not diseases:
-                return []
+        diseases = self._load_diseases()
+        if not diseases:
+            return []
 
-            query = " ".join(symptoms) + " " + user_input
-            results: List[Dict] = []
+        query = " ".join(symptoms) + " " + user_input
 
-            # TF-IDF stage
-            for disease, score in self._tfidf_rank(diseases, query):
-                if score < TFIDF_THRESHOLD:
+        results = []
+
+        # TF-IDF
+        for disease, score in self._tfidf_rank(diseases, query):
+            if score < TFIDF_THRESHOLD:
+                break
+
+            if disease.get("first_aid"):
+                results.append({
+                    "disease": disease["name"],
+                    "confidence": round(float(score), 4),
+                    "first_aid": disease["first_aid"]
+                })
+
+            if len(results) >= MAX_RESULTS:
+                break
+
+        # fallback
+        if not results:
+            scored = [
+                (d, self._keyword_score(d, symptoms))
+                for d in diseases
+            ]
+
+            scored.sort(key=lambda x: x[1], reverse=True)
+
+            for disease, score in scored:
+                if score <= 0:
                     break
 
-                r = self._build_result(disease, score)
-                if r:
-                    results.append(r)
+                if disease.get("first_aid"):
+                    results.append({
+                        "disease": disease["name"],
+                        "confidence": round(score, 4),
+                        "first_aid": disease["first_aid"]
+                    })
 
                 if len(results) >= MAX_RESULTS:
                     break
 
-            # Fallback
-            if not results:
-                kw_scored = [
-                    (d, self._keyword_score(d, symptoms))
-                    for d in diseases
-                ]
-                kw_scored.sort(key=lambda x: x[1], reverse=True)
-
-                for disease, score in kw_scored:
-                    if score <= 0:
-                        break
-
-                    r = self._build_result(disease, score)
-                    if r:
-                        results.append(r)
-
-                    if len(results) >= MAX_RESULTS:
-                        break
-
-            cache.set(cache_key, results, RESULT_CACHE_TIMEOUT)
-            return results
-
-        except Exception as exc:
-            logger.error("RAG retrieval error: %s", exc, exc_info=True)
-            return []
+        cache.set(cache_key, results, RESULT_CACHE_TIMEOUT)
+        return results
 
 
-# ── Singleton ─────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# SINGLETON
+# ─────────────────────────────────────────────
 
-_instance: Optional[RAGRetriever] = None
+_instance = None
 
 
-def get_rag_retriever() -> RAGRetriever:
+def get_rag_retriever():
     global _instance
     if _instance is None:
         _instance = RAGRetriever()
