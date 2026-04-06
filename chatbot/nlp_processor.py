@@ -2,16 +2,15 @@
 """
 Medical NLP Processor — NLTK only, no spaCy.
 
-spaCy removed because:
-  1. self.nlp was never called in any method — zero functionality lost.
-  2. blis/thinc require compiling C on Render, causing build failures.
-  3. NLTK is pure Python — installs in seconds, no compilation required.
-
 Two-pass symptom extraction:
   Pass 1 — DB Symptom records (name + alternative_names), cached.
   Pass 2 — Hardcoded Kenyan/Swahili variation dictionary.
 
 Emergency detection queries the EmergencyKeyword table, cached.
+
+Fix: extract_symptoms now returns canonical text names (e.g. "abdominal pain")
+in addition to DB-normalised names so the RAG retriever can match them against
+Disease.common_symptoms which stores human-readable text.
 """
 
 from __future__ import annotations
@@ -58,142 +57,264 @@ class MedicalNLPProcessor:
             logger.warning("NLTK stopwords not available — using empty set")
             self.stop_words = set()
 
-        self.symptom_variations: Dict[str, List[str]] = {
-            "fever": [
-                "fever", "hot body", "high temperature", "sweating", "chills",
-                "feverish", "joto", "feeling hot", "night sweats", "homa",
-                "body is hot", "ninauma joto",
-            ],
-            "headache": [
-                "headache", "head pain", "head hurting", "migraine",
-                "kichwa kuuma", "throbbing head", "pressure in head",
-                "maumivu ya kichwa",
-            ],
-            "cough": [
-                "cough", "coughing", "dry cough", "wet cough", "kikohozi",
-                "chest cough", "barking cough", "cannot stop coughing",
-                "coughing blood", "pink sputum",
-            ],
-            "fatigue": [
-                "fatigue", "tired", "weakness", "exhausted", "lethargy",
-                "no energy", "body weak", "uchovu", "udhaifu", "mwili dhaifu",
-            ],
-            "vomiting": [
-                "vomit", "vomiting", "throwing up", "nausea", "sick stomach",
-                "kutapika", "feel like vomiting",
-            ],
-            "diarrhea": [
-                "diarrhea", "diarrhoea", "loose stools", "running stomach",
-                "watery stool", "kuhara", "kutharau", "stomach running",
-                "frequent stool", "watery poop",
-            ],
-            "chest_pain": [
-                "chest pain", "chest discomfort", "heart pain", "tight chest",
-                "maumivu kifua", "squeezing chest",
-            ],
-            "difficulty_breathing": [
-                "difficulty breathing", "shortness of breath", "can't breathe",
-                "breathing fast", "wheezing", "kupumua shida", "breathless",
-                "laboured breathing", "unable to breathe",
-            ],
-            "joint_pain": [
-                "joint pain", "joint ache", "arthritis", "pain in joints",
-                "knees hurt", "maumivu viungo", "painful joints",
-            ],
-            "muscle_pain": [
-                "muscle pain", "myalgia", "body aches", "sore muscles",
-                "whole body pain", "mwili kuuma", "maumivu mwilini",
-            ],
-            "stomach_ache": [
-                "stomach ache", "stomach pain", "abdominal pain", "belly pain",
-                "tumbo kuuma", "cramping", "tummy hurts", "stomach cramps",
-            ],
-            "rash": [
-                "rash", "skin rash", "red spots", "itching", "hives",
-                "skin bumps", "upele", "kuwasha ngozi",
-            ],
-            "dehydration": [
-                "dehydrated", "dry mouth", "sunken eyes", "thirsty", "dark urine",
-                "no tears", "very thirsty", "mouth dry",
-            ],
-            "confusion": [
-                "confused", "disoriented", "delirium", "not acting normal",
-                "altered mental", "not responding", "behaving strangely",
-            ],
-            "sore_throat": [
-                "sore throat", "throat pain", "swallowing difficulty",
-                "throat swollen", "koo kuuma", "painful swallow",
-            ],
-            "dizziness": [
-                "dizzy", "dizziness", "lightheaded", "spinning", "vertigo",
-                "off balance", "kizunguzungu",
-            ],
-            "numbness": [
-                "numb", "numbness", "tingling", "pins and needles",
-                "loss of feeling", "feet tingling",
-            ],
-            "swelling": [
-                "swelling", "swollen", "edema", "puffy", "inflamed",
-                "kuvimba", "swollen feet", "swollen face",
-            ],
-            "weight_loss": [
-                "weight loss", "losing weight", "getting thin",
-                "kupoteza uzito", "wasting", "very thin",
-            ],
-            "night_sweats": [
-                "night sweats", "sweating at night", "waking up sweaty",
-                "bedsheets wet from sweat",
-            ],
-            "jaundice": [
-                "yellow eyes", "yellow skin", "jaundice", "macho ya njano",
-                "yellowing", "eyes are yellow",
-            ],
-            "blood_cough": [
-                "coughing blood", "blood in sputum", "bloody cough",
-                "pink sputum", "blood when coughing",
-            ],
-            "frequent_urination": [
-                "frequent urination", "urinating often", "passing urine many times",
-                "wake up to pee", "mkojo mara nyingi",
-            ],
-            "burning_urination": [
-                "burning urination", "painful urination", "urine burns",
-                "pain when urinating", "mkojo kuuma",
-            ],
-            "stiff_neck": [
-                "stiff neck", "neck stiffness", "cannot bend neck",
-                "shingo ngumu", "neck pain",
-            ],
-            "convulsions": [
-                "convulsions", "seizure", "fits", "shaking uncontrollably",
-                "degedege", "epileptic attack", "jerking",
-            ],
-            "pale_skin": [
-                "pale skin", "pallor", "pale gums", "white gums",
-                "pale conjunctiva", "inner eyelids pale",
-            ],
-            "itching": [
-                "itching", "intense itch", "skin itching", "genital itching",
-                "kuwasha", "mwili kuwasha", "scratching all over",
-            ],
-            "discharge": [
-                "discharge", "genital discharge", "pus", "yellow discharge",
-                "green discharge", "smelly discharge",
-            ],
-            "eye_pain": [
-                "eye pain", "red eyes", "eye discharge", "eye swelling",
-                "macho kuuma", "eyes red", "sticky eyes",
-            ],
-            "ear_pain": [
-                "ear pain", "ear discharge", "hearing loss",
-                "masikio kuuma", "ears ringing", "ear ache",
-            ],
+        # Maps extracted key → list of text variations to match in user input.
+        # Each key also maps to canonical_name (the human-readable text that
+        # will be used for disease matching).
+        self.symptom_variations: Dict[str, Dict] = {
+            "fever": {
+                "canonical": "fever",
+                "variations": [
+                    "fever", "hot body", "high temperature", "sweating", "chills",
+                    "feverish", "joto", "feeling hot", "night sweats", "homa",
+                    "body is hot", "ninauma joto", "temperature",
+                ],
+            },
+            "headache": {
+                "canonical": "headache",
+                "variations": [
+                    "headache", "head pain", "head hurting", "migraine",
+                    "kichwa kuuma", "throbbing head", "pressure in head",
+                    "maumivu ya kichwa",
+                ],
+            },
+            "cough": {
+                "canonical": "cough",
+                "variations": [
+                    "cough", "coughing", "dry cough", "wet cough", "kikohozi",
+                    "chest cough", "barking cough", "cannot stop coughing",
+                ],
+            },
+            "fatigue": {
+                "canonical": "fatigue",
+                "variations": [
+                    "fatigue", "tired", "weakness", "exhausted", "lethargy",
+                    "no energy", "body weak", "uchovu", "udhaifu", "mwili dhaifu",
+                    "feeling weak", "very tired",
+                ],
+            },
+            "vomiting": {
+                "canonical": "vomiting",
+                "variations": [
+                    "vomit", "vomiting", "throwing up", "nausea", "sick stomach",
+                    "kutapika", "feel like vomiting", "nauseated",
+                ],
+            },
+            "diarrhea": {
+                "canonical": "diarrhea",
+                "variations": [
+                    "diarrhea", "diarrhoea", "loose stools", "running stomach",
+                    "watery stool", "kuhara", "kutharau", "stomach running",
+                    "frequent stool", "watery poop", "loose stool",
+                ],
+            },
+            "chest_pain": {
+                "canonical": "chest pain",
+                "variations": [
+                    "chest pain", "chest discomfort", "heart pain", "tight chest",
+                    "maumivu kifua", "squeezing chest", "chest tightness",
+                    "chest pressure",
+                ],
+            },
+            "difficulty_breathing": {
+                "canonical": "difficulty breathing",
+                "variations": [
+                    "difficulty breathing", "shortness of breath", "can't breathe",
+                    "breathing fast", "wheezing", "kupumua shida", "breathless",
+                    "laboured breathing", "unable to breathe", "short of breath",
+                    "hard to breathe", "breathing difficulty",
+                ],
+            },
+            "joint_pain": {
+                "canonical": "joint pain",
+                "variations": [
+                    "joint pain", "joint ache", "arthritis", "pain in joints",
+                    "knees hurt", "maumivu viungo", "painful joints",
+                    "aching joints",
+                ],
+            },
+            "muscle_pain": {
+                "canonical": "muscle pain",
+                "variations": [
+                    "muscle pain", "myalgia", "body aches", "sore muscles",
+                    "whole body pain", "mwili kuuma", "maumivu mwilini",
+                    "body is aching", "body pains",
+                ],
+            },
+            "stomach_ache": {
+                "canonical": "abdominal pain",
+                "variations": [
+                    "stomach ache", "stomach pain", "abdominal pain", "belly pain",
+                    "tumbo kuuma", "cramping", "tummy hurts", "stomach cramps",
+                    "tummy pain", "abdominal cramps",
+                ],
+            },
+            "rash": {
+                "canonical": "rash",
+                "variations": [
+                    "rash", "skin rash", "red spots", "hives",
+                    "skin bumps", "upele", "spots on skin", "skin spots",
+                ],
+            },
+            "dehydration": {
+                "canonical": "dehydration",
+                "variations": [
+                    "dehydrated", "dry mouth", "sunken eyes", "thirsty", "dark urine",
+                    "no tears", "very thirsty", "mouth dry",
+                ],
+            },
+            "confusion": {
+                "canonical": "confusion",
+                "variations": [
+                    "confused", "disoriented", "delirium", "not acting normal",
+                    "altered mental", "not responding", "behaving strangely",
+                ],
+            },
+            "sore_throat": {
+                "canonical": "sore throat",
+                "variations": [
+                    "sore throat", "throat pain", "swallowing difficulty",
+                    "throat swollen", "koo kuuma", "painful swallow",
+                    "throat hurts",
+                ],
+            },
+            "dizziness": {
+                "canonical": "dizziness",
+                "variations": [
+                    "dizzy", "dizziness", "lightheaded", "spinning", "vertigo",
+                    "off balance", "kizunguzungu", "feeling faint",
+                ],
+            },
+            "numbness": {
+                "canonical": "numbness",
+                "variations": [
+                    "numb", "numbness", "tingling", "pins and needles",
+                    "loss of feeling", "feet tingling",
+                ],
+            },
+            "swelling": {
+                "canonical": "swelling",
+                "variations": [
+                    "swelling", "swollen", "edema", "puffy", "inflamed",
+                    "kuvimba", "swollen feet", "swollen face",
+                ],
+            },
+            "weight_loss": {
+                "canonical": "weight loss",
+                "variations": [
+                    "weight loss", "losing weight", "getting thin",
+                    "kupoteza uzito", "wasting", "very thin",
+                ],
+            },
+            "night_sweats": {
+                "canonical": "night sweats",
+                "variations": [
+                    "night sweats", "sweating at night", "waking up sweaty",
+                    "bedsheets wet from sweat",
+                ],
+            },
+            "jaundice": {
+                "canonical": "jaundice",
+                "variations": [
+                    "yellow eyes", "yellow skin", "jaundice", "macho ya njano",
+                    "yellowing", "eyes are yellow",
+                ],
+            },
+            "blood_cough": {
+                "canonical": "coughing blood",
+                "variations": [
+                    "coughing blood", "blood in sputum", "bloody cough",
+                    "pink sputum", "blood when coughing",
+                ],
+            },
+            "frequent_urination": {
+                "canonical": "frequent urination",
+                "variations": [
+                    "frequent urination", "urinating often", "passing urine many times",
+                    "wake up to pee", "mkojo mara nyingi",
+                ],
+            },
+            "burning_urination": {
+                "canonical": "burning urination",
+                "variations": [
+                    "burning urination", "painful urination", "urine burns",
+                    "pain when urinating", "mkojo kuuma",
+                ],
+            },
+            "stiff_neck": {
+                "canonical": "stiff neck",
+                "variations": [
+                    "stiff neck", "neck stiffness", "cannot bend neck",
+                    "shingo ngumu", "neck pain",
+                ],
+            },
+            "convulsions": {
+                "canonical": "convulsions",
+                "variations": [
+                    "convulsions", "seizure", "fits", "shaking uncontrollably",
+                    "degedege", "epileptic attack", "jerking",
+                ],
+            },
+            "pale_skin": {
+                "canonical": "pale skin",
+                "variations": [
+                    "pale skin", "pallor", "pale gums", "white gums",
+                    "pale conjunctiva", "inner eyelids pale",
+                ],
+            },
+            "itching": {
+                "canonical": "itching",
+                "variations": [
+                    "itching", "intense itch", "skin itching", "genital itching",
+                    "kuwasha", "mwili kuwasha", "scratching all over",
+                ],
+            },
+            "discharge": {
+                "canonical": "discharge",
+                "variations": [
+                    "discharge", "genital discharge", "pus", "yellow discharge",
+                    "green discharge", "smelly discharge",
+                ],
+            },
+            "eye_pain": {
+                "canonical": "eye pain",
+                "variations": [
+                    "eye pain", "red eyes", "eye discharge", "eye swelling",
+                    "macho kuuma", "eyes red", "sticky eyes",
+                ],
+            },
+            "ear_pain": {
+                "canonical": "ear pain",
+                "variations": [
+                    "ear pain", "ear discharge", "hearing loss",
+                    "masikio kuuma", "ears ringing", "ear ache",
+                ],
+            },
+            "runny_nose": {
+                "canonical": "runny nose",
+                "variations": [
+                    "runny nose", "nasal discharge", "blocked nose",
+                    "pua inayotiririka", "stuffy nose",
+                ],
+            },
+            "sneezing": {
+                "canonical": "sneezing",
+                "variations": [
+                    "sneezing", "sneezing constantly",
+                ],
+            },
+            "loss_appetite": {
+                "canonical": "loss of appetite",
+                "variations": [
+                    "loss of appetite", "not eating", "no appetite",
+                    "chakula hakivutii", "cannot eat", "not hungry",
+                ],
+            },
         }
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
     def _get_all_symptoms(self) -> list:
-        key = "nlp_symptoms_v2"
+        key = "nlp_symptoms_v3"
         result = cache.get(key)
         if result is None:
             from .models import Symptom
@@ -202,7 +323,7 @@ class MedicalNLPProcessor:
         return result
 
     def _get_emergency_keywords(self) -> list:
-        key = "nlp_emergency_v2"
+        key = "nlp_emergency_v3"
         result = cache.get(key)
         if result is None:
             from .models import EmergencyKeyword
@@ -227,7 +348,9 @@ class MedicalNLPProcessor:
     def extract_symptoms(self, text: str) -> List[str]:
         """
         Extract symptom names from user input.
-        Returns a deduplicated list ordered by first match.
+        Returns a deduplicated list of canonical symptom text names
+        (e.g. "abdominal pain", "difficulty breathing") that directly
+        match Disease.common_symptoms field values.
         """
         text_lower = text.lower()
         extracted: List[str] = []
@@ -236,21 +359,22 @@ class MedicalNLPProcessor:
         try:
             for symptom in self._get_all_symptoms():
                 if symptom.name.lower() in text_lower:
-                    extracted.append(symptom.name)
+                    extracted.append(symptom.name.lower())
                     continue
                 if symptom.alternative_names:
                     for alt in symptom.alternative_names.split(","):
                         if alt.strip().lower() in text_lower:
-                            extracted.append(symptom.name)
+                            extracted.append(symptom.name.lower())
                             break
         except Exception as exc:
             logger.error("DB symptom extraction error: %s", exc)
 
-        # Pass 2 — hardcoded Kenyan/Swahili variations
-        for sym_key, variations in self.symptom_variations.items():
-            for var in variations:
+        # Pass 2 — hardcoded Kenyan/Swahili variations → canonical text
+        for sym_key, sym_data in self.symptom_variations.items():
+            canonical = sym_data["canonical"]
+            for var in sym_data["variations"]:
                 if var in text_lower:
-                    extracted.append(sym_key)
+                    extracted.append(canonical)
                     break
 
         # Deduplicate preserving insertion order
