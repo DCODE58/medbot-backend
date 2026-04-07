@@ -20,3 +20,4 @@ htmlcov/
 .pytest_cache/
 nltk_data/
 en_core_web_sm*/
+.env
